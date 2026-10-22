@@ -1,9 +1,8 @@
 from fastapi import FastAPI
 
-
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="My Service",
+        title="Parking Service",
         description="Student microservice for LAB1",
         version="0.1.0",
     )
@@ -13,10 +12,15 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "replace-me"}
+        return {"status": "ok", "service": "parking-service"}
 
     # TODO: dodaj tutaj modele/endpointy własnej domeny lub dołącz routery.
     # Magazyn twórz tylko raz na aplikację; endpointy korzystają z app.state.
+
+
+
+
+
     return app
 
 
