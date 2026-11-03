@@ -12,6 +12,10 @@ ALLOWED_TRANSITIONS = {
 }
 
 
+def is_unique_violation(exc: IntegrityError) -> bool:
+    return "UNIQUE" in str(exc.orig).upper()
+
+
 def lot_payload(row: ParkingLotRow) -> dict:
     return {"id": row.id, "name": row.name, "address": row.address}
 
@@ -59,6 +63,8 @@ class ParkingRepository:
                 db.flush()
                 return lot_payload(row)
         except IntegrityError as exc:
+            if not is_unique_violation(exc):
+                raise
             raise ValueError(
                 f"Parking lot with name '{data.name}' already exists"
             ) from exc
@@ -111,6 +117,8 @@ class ParkingRepository:
                 db.flush()
                 return space_payload(row)
         except IntegrityError as exc:
+            if not is_unique_violation(exc):
+                raise
             raise ValueError(message) from exc
 
     def update_status(self, space_id: int, new_status: SpaceStatus) -> dict:

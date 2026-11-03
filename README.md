@@ -565,7 +565,7 @@ space.status = body.status
 
 LAB2 rozwija **tę samą usługę** (Parking Service): dane z pamięci procesu przechodzą do bazy SQLite (SQLAlchemy), a wybrany odczyt dostaje cache w Redis (cache-aside). **Kontrakt API z sekcji 4 nie zmienia się** — te same metody, ścieżki, identyfikatory, JSON i kody błędów (`404`, `409`, `422`).
 
-Stan prac w tym README: opisane są kroki 1–3 (stan początkowy, model danych, podłączenie bazy). Cache, awarie i testy LAB2 zostaną dopisane w kolejnych krokach.
+Stan prac w tym README: opisane są kroki 1–5 (stan początkowy, model danych, podłączenie bazy, operacje i reguła w bazie, cache-aside). Obsługa awarii Redis, testy awarii i końcowa dokumentacja zostaną dopisane w kolejnych krokach.
 
 ### Zmiany względem LAB1
 
@@ -643,6 +643,50 @@ python -m uvicorn app.main:app --port 8101
 ```
 
 Po zmianie zmiennych serwer trzeba zatrzymać (Ctrl+C) i uruchomić ponownie w tym samym terminalu — samo `--reload` ich nie odświeża.
+
+### Krok 4 — operacje i reguła w bazie
+
+Wszystkie operacje z sekcji 4 (listy, szczegóły, `POST` parkingu i miejsca, `PATCH` statusu) korzystają wyłącznie z bazy przez `ParkingRepository`; `Store` w pamięci został usunięty. Zmianą, która posłuży później do testu unieważnienia cache, jest `PATCH /spaces/{id}/status`.
+
+- **Kolejność w zapisie:** odczyt stanu → sprawdzenie reguły → zmiana → commit. W `update_status` całość dzieje się w jednej transakcji (`sessions.begin()`); wyjątek przed commitem wycofuje ją, więc odrzucone żądanie nie zostawia częściowej zmiany.
+- **Reguła przejść statusów** (`ALLOWED_TRANSITIONS`, `app/repository.py`) działa na stanie z bazy; naruszenie → `ValueError` → `409` z komunikatem `Niedozwolona zmiana statusu: X -> Y`. Ten sam status co obecny jest konfliktem.
+- **Mapowanie błędów:** brak rekordu → `LookupError` → `404`; duplikat nazwy parkingu lub numeru miejsca → `409`. Konflikt wykrywa sprawdzenie w transakcji, a `IntegrityError` z naruszenia **unikalności** (np. wyścig dwóch żądań) też daje `409`. Inne błędy bazy (np. klucz obcy) **nie** są zamieniane na `409` — kończą się błędem serwera.
+- **Dowód trwałości i brak częściowego zapisu** (testy w `tests/test_persistence.py`, osobna aplikacja na tym samym pliku bazy z pustym cache):
+  - `test_changes_survive_new_app_instance` — zapis miejsca i zmiana statusu są widoczne po utworzeniu nowej instancji; seed nie nadpisuje zmian,
+  - `test_rejected_operations_leave_database_unchanged` — odrzucone `409` nie zmieniają stanu po ponownym odczycie,
+  - `test_unique_violation_maps_to_409_and_rolls_back`, `test_foreign_key_is_enforced` — ograniczenia bazy działają, a nieudana transakcja jest wycofana.
+
+Ręcznie: zmiana statusu → `GET /spaces/1` → zatrzymanie i ponowny start Uvicorna → `GET /spaces/1` zwraca zmieniony status; `PATCH` na niedozwolony status daje `409`, a kolejny `GET` pokazuje poprzedni stan.
+
+### Krok 5 — cache-aside dla `GET /spaces/{id}`
+
+Cache obejmuje jeden odczyt: szczegóły miejsca. Klucz: `<CACHE_PREFIX>:space:<id>` (np. `lab2:<album>:parking-service:space:1`), wartość to JSON odpowiedzi (`model_dump(mode="json")`, nie obiekt ORM), TTL z `CACHE_TTL_SECONDS` (60 s).
+
+**Odczyt (`GET /spaces/{id}`)** — odpowiedź zawiera nagłówek `X-Cache`:
+
+| Wartość | Znaczenie |
+|---------|-----------|
+| `HIT` | wpis był w Redis; baza nie została odpytana |
+| `MISS` | brak wpisu; odczyt z bazy i zapis kopii do Redis z TTL |
+| `BYPASS` | Redis niedostępny; odpowiedź z bazy bez cache |
+
+Brak miejsca → `404`, bez zapisu do cache (nie cache'ujemy błędów).
+
+**Zmiana (`PATCH /spaces/{id}/status`):** najpierw commit w bazie, **dopiero potem** `cache.delete(id)`. Odrzucona zmiana (`404`/`409`) nie dochodzi do unieważnienia, więc nie kasuje wpisu niepotrzebnie. Awaria Redis przy `delete` nie cofa zatwierdzonej zmiany (szczegóły: krok 6).
+
+**Dowód na prawdziwym Redis** (Docker `lab2-redis`, miejsce 1, stan początkowy `FREE`):
+
+| Krok | Żądanie | Oczekiwany wynik | Rzeczywisty wynik |
+|------|---------|------------------|-------------------|
+| 1 | `GET /spaces/1` | `200`, `X-Cache: MISS` | zgodny |
+| 2 | `GET /spaces/1` | `200`, `X-Cache: HIT` | zgodny |
+| 3 | `redis-cli TTL <klucz>` | liczba ≤ 60 | `52` |
+| 4 | `PATCH /spaces/1/status` `{"status":"RESERVED"}` | `200`, `RESERVED` | zgodny |
+| 5 | `GET /spaces/1` | `MISS`, status `RESERVED` (nie stara wartość) | zgodny |
+
+Reset: `docker exec lab2-redis redis-cli DEL <klucz>` oraz usunięcie pliku `app.db` (nie używać `FLUSHALL`/`FLUSHDB`).
+
+**Testy** (`tests/test_cache.py`, atrapa Redis): `test_miss_then_hit_skips_repository` (HIT nie woła repozytorium, TTL = 60), `test_patch_invalidates_cache`, `test_rejected_patch_keeps_cache`, `test_missing_space_is_404_and_not_cached`.
 
 ## 7. Stos technologiczny i struktura repozytorium
 

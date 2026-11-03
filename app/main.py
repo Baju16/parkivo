@@ -1,7 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 
 from app import db_models  # noqa: F401  rejestruje tabele w Base.metadata
 from app.cache import JsonCache, make_redis
@@ -95,20 +95,34 @@ def create_app(database_url=None, redis_client=None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/spaces/{space_id}", response_model=ParkingSpace)
-    def get_space(space_id: int, request: Request):
+    def get_space(space_id: int, request: Request, response: Response):
+        repository = request.app.state.repository
+        cache = request.app.state.cache
+        cached, source = cache.get(space_id)
+        if cached is not None:
+            response.headers["X-Cache"] = source
+            return cached
         try:
-            return request.app.state.repository.get_space(space_id)
+            result = repository.get_space(space_id)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        payload = ParkingSpace.model_validate(result).model_dump(mode="json")
+        if source != "BYPASS" and not cache.put(space_id, payload):
+            source = "BYPASS"
+        response.headers["X-Cache"] = source
+        return payload
 
     @app.patch("/spaces/{space_id}/status", response_model=ParkingSpace)
     def update_space_status(space_id: int, body: StatusUpdate, request: Request):
         try:
-            return request.app.state.repository.update_status(space_id, body.status)
+            updated = request.app.state.repository.update_status(space_id, body.status)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # unieważnienie dopiero po commicie w bazie
+        request.app.state.cache.delete(space_id)
+        return updated
 
     return app
 
