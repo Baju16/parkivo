@@ -2,6 +2,10 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app import db_models  # noqa: F401  rejestruje tabele w Base.metadata
 from app.cache import JsonCache, make_redis
@@ -54,6 +58,30 @@ def create_app(database_url=None, redis_client=None) -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "service": "parking-service"}
+
+    @app.get("/ready")
+    def readiness(request: Request):
+        try:
+            with request.app.state.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            db_ok = True
+        except SQLAlchemyError:
+            db_ok = False
+        try:
+            cache_ok = bool(request.app.state.redis.ping())
+        except RedisError:
+            cache_ok = False
+
+        status = "ok" if (db_ok and cache_ok) else ("degraded" if db_ok else "error")
+        return JSONResponse(
+            status_code=200 if db_ok else 503,
+            content={
+                "service": "parking-service",
+                "status": status,
+                "database": "ok" if db_ok else "down",
+                "cache": "ok" if cache_ok else "down",
+            },
+        )
 
     @app.get("/parking-lots", response_model=list[ParkingLot])
     def list_lots(request: Request):

@@ -565,7 +565,7 @@ space.status = body.status
 
 LAB2 rozwija **tę samą usługę** (Parking Service): dane z pamięci procesu przechodzą do bazy SQLite (SQLAlchemy), a wybrany odczyt dostaje cache w Redis (cache-aside). **Kontrakt API z sekcji 4 nie zmienia się** — te same metody, ścieżki, identyfikatory, JSON i kody błędów (`404`, `409`, `422`).
 
-Stan prac w tym README: opisane są kroki 1–5 (stan początkowy, model danych, podłączenie bazy, operacje i reguła w bazie, cache-aside). Obsługa awarii Redis, testy awarii i końcowa dokumentacja zostaną dopisane w kolejnych krokach.
+Stan prac w tym README: opisane są kroki 1–7 (stan początkowy, model danych, podłączenie bazy, operacje i reguła w bazie, cache-aside, awaria cache, testy). Końcowa dokumentacja zostanie dopisana w kroku 8.
 
 ### Zmiany względem LAB1
 
@@ -687,6 +687,66 @@ Brak miejsca → `404`, bez zapisu do cache (nie cache'ujemy błędów).
 Reset: `docker exec lab2-redis redis-cli DEL <klucz>` oraz usunięcie pliku `app.db` (nie używać `FLUSHALL`/`FLUSHDB`).
 
 **Testy** (`tests/test_cache.py`, atrapa Redis): `test_miss_then_hit_skips_repository` (HIT nie woła repozytorium, TTL = 60), `test_patch_invalidates_cache`, `test_rejected_patch_keeps_cache`, `test_missing_space_is_404_and_not_cached`.
+
+### Krok 6 — awaria cache
+
+Redis jest opcjonalny: jego awaria nie może zablokować odczytu ani cofnąć zatwierdzonej zmiany w bazie. `JsonCache` (`app/cache.py`) łapie `RedisError` przy `get`, `put` i `delete`, loguje ostrzeżenie i nie przerywa żądania. Klient Redis ma krótkie limity (`socket_connect_timeout` i `socket_timeout` 0,3 s) i brak ponowień.
+
+| Operacja przy niedostępnym Redis | Zachowanie |
+|----------------------------------|-----------|
+| `GET /spaces/{id}` | `200` z bazy, `X-Cache: BYPASS` |
+| `PATCH /spaces/{id}/status` | zmiana zatwierdzona w bazie, `200`; nieudane `delete` jest tylko logowane |
+| nieudany zapis kopii po `MISS` | `200` z bazy, `X-Cache: BYPASS` |
+| reguła biznesowa / `404` | działają bez zmian (`409`, `404`) |
+
+**Ograniczenie spójności:** commit w bazie i usunięcie klucza w Redis nie są jedną transakcją. Jeśli Redis jest niedostępny podczas `PATCH`, stary wpis zostaje i po powrocie Redis `GET` zwraca **starą wartość aż do wygaśnięcia TTL** (max 60 s). Prosty cache-aside nie daje też ścisłej spójności przy równoległych zapisach i odczytach. Dla danych, które nie tolerują takiego opóźnienia (np. ostateczna decyzja o rezerwacji), nie wolno opierać się na kopii z cache.
+
+**Endpoint `/ready`** (rozszerzenie; `/health` bez zmian): `{"service","status","database","cache"}`. Baza i Redis działają → `ok`, `200`; Redis nie działa → `degraded`, `200`; baza nie działa → `error`, `503`.
+
+**Dowód na prawdziwym Redis** (miejsce 1, stan początkowy `FREE`):
+
+| Krok | Akcja | Oczekiwany wynik | Rzeczywisty wynik |
+|------|-------|------------------|-------------------|
+| 1 | `GET /spaces/1` dwa razy | `MISS`, potem `HIT` | zgodny |
+| 2 | `docker stop lab2-redis` | — | — |
+| 3 | `GET /spaces/1` | `200`, `X-Cache: BYPASS`, `FREE` | zgodny |
+| 4 | `PATCH /spaces/1/status` `RESERVED` | `200`, `RESERVED` (zapis w bazie) | zgodny |
+| 5 | `GET /ready` | `200`, `degraded`, `cache: down` | zgodny |
+| 6 | `docker start lab2-redis`, `GET /spaces/1` | stara wartość z cache do końca TTL | `HIT`, status `FREE` (stary), TTL 57 s |
+| 7 | `redis-cli DEL <klucz>`, `GET /spaces/1` | `MISS`, `RESERVED` | zgodny |
+
+Krok 6 pokazuje opisane ograniczenie: baza ma `RESERVED`, a cache jeszcze `FREE`. Reset: `DEL` klucza i usunięcie `app.db`.
+
+**Testy** (`tests/test_cache_failure.py`): odczyt i zapis bez Redis (`BYPASS`, zmiana w bazie), reguły i `404` bez Redis, nieudane unieważnienie zostawia starą wartość, nieudany zapis kopii, `/ready` w stanie `degraded`. Atrapa `MemoryRedis` nie symuluje upływu TTL, więc wygasania nie potwierdza — to sprawdzono ręcznie.
+
+### Krok 7 — testy
+
+Uruchomienie: `python -m pytest -q` (nie wymaga Dockera ani Redis). Fixture `client` w `tests/conftest.py` tworzy dla **każdego testu** osobną bazę SQLite w `tmp_path` i nową atrapę `MemoryRedis` z prefiksem `lab2:test:parking-service`, więc testy nie współdzielą danych ani kluczy. Atrapa nie symuluje upływu TTL (potwierdzono go ręcznie, niżej). Testy LAB1 (walidacja, konflikty, reguła przejść) zostały zachowane i przechodzą na bazie.
+
+| Wymaganie | Test |
+|-----------|------|
+| Trwałość: zapis, nowa instancja z tą samą bazą i pustym cache | `test_changes_survive_new_app_instance` (`tests/test_persistence.py`) |
+| HIT/MISS; przy HIT repozytorium nie jest wywołane | `test_miss_then_hit_skips_repository` (`tests/test_cache.py`) — licznik wywołań `get_space` przez `monkeypatch` = 1 |
+| Unieważnienie: GET, zmiana przez API, kolejny GET z nową wartością i `MISS` | `test_patch_invalidates_cache` (+ `test_rejected_patch_keeps_cache`) |
+| Awaria cache: `fake_redis.down = True`, odczyt `200` + `BYPASS`, zapis zatwierdzony w bazie | `test_read_and_write_work_without_redis` (`tests/test_cache_failure.py`) |
+| Brak częściowego zapisu po odrzuceniu | `test_rejected_operations_leave_database_unchanged` |
+| Błędy: brak zasobu nie trafia do cache | `test_missing_space_is_404_and_not_cached` |
+
+Dodatkowo: `test_failed_invalidation_leaves_stale_value_until_ttl`, `test_failed_cache_set_still_returns_database_value`, `test_ready_reports_degraded_without_redis`, `test_unique_violation_maps_to_409_and_rolls_back`, `test_foreign_key_is_enforced`. Łącznie 28 testów.
+
+**Ręczna weryfikacja z prawdziwym Redis** (Docker `lab2-redis`, `CACHE_TTL_SECONDS=5`, miejsce 1, stan początkowy `FREE`, baza `app.db` usunięta przed próbą):
+
+| Krok | Żądanie / akcja | Oczekiwany wynik | Rzeczywisty wynik |
+|------|-----------------|------------------|-------------------|
+| 1 | `GET /spaces/1` ×2 | `MISS`, `HIT` | zgodny |
+| 2 | `redis-cli TTL <klucz>` | ≤ 5 | `5` |
+| 3 | czekanie 6 s, `GET /spaces/1` | `MISS` (wpis wygasł) | zgodny |
+| 4 | `PATCH` na `OCCUPIED`, `GET` ×2 | `MISS` z nowym statusem, potem `HIT` | zgodny |
+| 5 | restart Uvicorna, `GET` | `HIT` — wpis przeżył restart aplikacji; status `OCCUPIED` | zgodny |
+| 6 | czekanie 6 s, `GET` (nowy proces) | `MISS`, `OCCUPIED` odczytany z bazy | zgodny |
+| 7 | odłączenie i przywrócenie Redis | patrz krok 6 (`BYPASS`, stara wartość do końca TTL) | zgodny |
+
+Reset: `docker exec lab2-redis redis-cli DEL <klucz>` i usunięcie `app.db`. Nie używano `FLUSHALL`/`FLUSHDB`; testy mają własny prefiks.
 
 ## 7. Stos technologiczny i struktura repozytorium
 
