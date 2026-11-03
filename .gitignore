@@ -3,3 +3,14 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .idea
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+LAB2-INSTRUKCJA.md

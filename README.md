@@ -10,7 +10,8 @@ Główny cel: pokazać jeden proces biznesowy realizowany przez współpracując
 3. [Model danych](#3-model-danych-parking-service)
 4. [API Parking Service](#4-api-parking-service)
 5. [Implementacja LAB1](#5-implementacja-lab1)
-6. [Stos technologiczny i struktura repozytorium](#6-stos-technologiczny-i-struktura-repozytorium)
+6. [Implementacja LAB2 (baza i cache)](#6-implementacja-lab2-baza-i-cache)
+7. [Stos technologiczny i struktura repozytorium](#7-stos-technologiczny-i-struktura-repozytorium)
 
 ---
 
@@ -560,7 +561,90 @@ space.status = body.status
 
 **Sprawdzenie:** `GET /spaces/99` daje `404` z `{"detail": "Space 99 not found"}` (`test_missing_resources_return_404`); `OCCUPIED → RESERVED` daje `409`, a następny `GET` pokazuje nadal `OCCUPIED` (`test_occupied_space_cannot_be_reserved`).
 
-## 6. Stos technologiczny i struktura repozytorium
+## 6. Implementacja LAB2 (baza i cache)
+
+LAB2 rozwija **tę samą usługę** (Parking Service): dane z pamięci procesu przechodzą do bazy SQLite (SQLAlchemy), a wybrany odczyt dostaje cache w Redis (cache-aside). **Kontrakt API z sekcji 4 nie zmienia się** — te same metody, ścieżki, identyfikatory, JSON i kody błędów (`404`, `409`, `422`).
+
+Stan prac w tym README: opisane są kroki 1–3 (stan początkowy, model danych, podłączenie bazy). Cache, awarie i testy LAB2 zostaną dopisane w kolejnych krokach.
+
+### Zmiany względem LAB1
+
+| | LAB1 | LAB2 |
+|---|------|------|
+| Dane | słowniki w pamięci (`Store`) | tabele w SQLite (`app.db`) |
+| Restart procesu | dane wracają do seeda | dane zostają w pliku bazy |
+| Dostęp do danych | `Depends(get_store)` | repozytorium (`app/repository.py`) |
+| Konfiguracja | brak | `create_app(database_url, redis_client)` + zmienne środowiskowe |
+| Cache | brak | odczyt `GET /spaces/{id}` w Redis (krok 5) |
+
+### Krok 1 — stan początkowy
+
+Przed zmianami uruchomiono testy LAB1 (`python -m pytest -q`) oraz usługę (`python -m uvicorn app.main:app --port 8101`). Zmiany danych przez API były widoczne w kolejnych `GET`, ale **po restarcie procesu znikały** — szczegółowy przebieg i zrzuty ekranu: [Eksperyment z restartem](#eksperyment-z-restartem). To jest problem, który rozwiązuje LAB2. W LAB1 nie było żadnej bazy ani pliku z danymi, więc nie ma istniejącej persystencji do opisania.
+
+### Krok 2 — model danych i decyzje
+
+| Decyzja | Odpowiedź i uzasadnienie |
+|---------|--------------------------|
+| Jakie dane muszą przetrwać restart? | Parkingi, miejsca i **aktualny status każdego miejsca** — to jedyne dane domenowe Parking Service. |
+| Jakie tabele i powiązania są potrzebne? | `parking_lots` (`id`, `name` unikalna, `address`) oraz `parking_spaces` (`id`, `parking_lot_id` → FK do `parking_lots.id`, `number`, `type`, `status`). Relacja 1:N: parking ma wiele miejsc. |
+| Która usługa może je zapisywać? | Wyłącznie Parking Service. Inne usługi zmieniają status tylko przez `PATCH /spaces/{id}/status`, nigdy bezpośrednio w tabelach. |
+| Których danych drugiej usługi tu nie zapisujemy? | Rezerwacji (kto i kiedy — Reservation Service), sesji postoju i rachunków. Status `RESERVED` to stan miejsca, a nie rezerwacja. |
+| Co chroni baza, a co reguła biznesowa? | **Baza:** klucze główne, klucz obcy `parking_lot_id`, unikalność `parking_lots.name` oraz pary `(parking_lot_id, number)`. **Reguła w kodzie:** dozwolone przejścia statusów (sekcja 3); naruszenie → `409`, zanim cokolwiek się zmieni. Tabeli przejść nie da się wyrazić samym ograniczeniem bazy. |
+| Jaki odczyt cache'ujemy i jak długo może być nieaktualny? | `GET /spaces/{id}`; kopia może być nieaktualna maksymalnie do końca TTL (60 s), a w praktyce krócej, bo zmiana statusu usuwa wpis. Decyzja o rezerwacji nie powinna zapadać wyłącznie na podstawie kopii. |
+| Prefiks, klucz, TTL, unieważnianie? | Prefiks `lab2:<numer_albumu>:parking-service`, klucz `…:space:{id}` (np. `lab2:<album>:parking-service:space:1`), TTL 60 s, unieważnienie przez `DELETE` klucza **po** commicie w bazie przy `PATCH /spaces/{id}/status`. |
+
+Wszystkie operacje na parkingach i miejscach korzystają z jednego magazynu — bazy. `Store` w pamięci przestaje być używany.
+
+### Krok 3 — podłączenie bazy
+
+**Zależności** (`requirements.txt`, zależności LAB1 zachowane):
+
+```
+SQLAlchemy>=2.0,<2.1
+redis>=5,<7
+```
+
+**Docelowa struktura kodu:**
+
+```
+app/
+  main.py        # create_app(database_url=None, redis_client=None), endpointy LAB1
+  models.py      # modele Pydantic (kontrakt API) — bez zmian
+  db_models.py   # modele ORM: tabele parking_lots, parking_spaces
+  database.py    # silnik, fabryka sesji, PRAGMA foreign_keys=ON
+  repository.py  # operacje na bazie, jedna sesja na operację
+  cache.py       # JsonCache (Redis) — używany od kroku 5
+tests/
+requirements.txt
+README.md
+```
+
+**Konfiguracja:**
+
+| Zmienna | Znaczenie | Przykład |
+|---------|-----------|----------|
+| `DATABASE_URL` | adres bazy (ścieżka względna do katalogu uruchomienia) | `sqlite:///./app.db` |
+| `REDIS_URL` | adres Redis | `redis://localhost:6379/0` |
+| `CACHE_PREFIX` | prefiks kluczy (wymagany przy starcie) | `lab2:<numer_albumu>:parking-service` |
+| `CACHE_TTL_SECONDS` | czas życia wpisu | `60` |
+
+Konfiguracja jest przekazywana jako argument `create_app(database_url, redis_client)`, więc testy mogą wskazać osobną bazę i atrapę Redis. Zasoby (silnik, klient Redis, repozytorium, cache) powstają w `lifespan` przy starcie aplikacji i są zwalniane przy zamknięciu (zamknięcie klienta Redis, `engine.dispose()`). Schemat tworzy `Base.metadata.create_all(engine)`; baza **nie jest kasowana** przy starcie, a `create_all` nie zmienia istniejących kolumn (migracje Alembic są poza zakresem). Dane początkowe (seed) są dodawane tylko do pustej bazy, żeby nie nadpisywać zmian ani nie dublować rekordów po restarcie.
+
+Plik bazy (`*.db` i pliki pomocnicze SQLite) jest w `.gitignore` i nie trafia do repozytorium. Zawartość bazy można podejrzeć w DataGrip (źródło danych SQLite → plik `app.db`).
+
+**Uruchomienie z konfiguracją:**
+
+```bash
+export DATABASE_URL="sqlite:///./app.db"
+export REDIS_URL="redis://localhost:6379/0"
+export CACHE_PREFIX="lab2:<numer_albumu>:parking-service"
+export CACHE_TTL_SECONDS=60
+python -m uvicorn app.main:app --port 8101
+```
+
+Po zmianie zmiennych serwer trzeba zatrzymać (Ctrl+C) i uruchomić ponownie w tym samym terminalu — samo `--reload` ich nie odświeża.
+
+## 7. Stos technologiczny i struktura repozytorium
 
 | Element | Technologia |
 |---------|-------------|
