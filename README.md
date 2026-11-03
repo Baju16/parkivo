@@ -565,7 +565,7 @@ space.status = body.status
 
 LAB2 rozwija **tę samą usługę** (Parking Service): dane z pamięci procesu przechodzą do bazy SQLite (SQLAlchemy), a wybrany odczyt dostaje cache w Redis (cache-aside). **Kontrakt API z sekcji 4 nie zmienia się** — te same metody, ścieżki, identyfikatory, JSON i kody błędów (`404`, `409`, `422`).
 
-Stan prac w tym README: opisane są kroki 1–7 (stan początkowy, model danych, podłączenie bazy, operacje i reguła w bazie, cache-aside, awaria cache, testy). Końcowa dokumentacja zostanie dopisana w kroku 8.
+Sekcja opisuje kolejno: stan początkowy, model danych, podłączenie bazy, operacje i regułę w bazie, cache-aside, awarię cache i testy, a na końcu uruchomienie, dowody, porównanie, ograniczenia, źródła i autorów.
 
 ### Zmiany względem LAB1
 
@@ -604,7 +604,7 @@ SQLAlchemy>=2.0,<2.1
 redis>=5,<7
 ```
 
-**Docelowa struktura kodu:**
+**Struktura kodu po LAB2:**
 
 ```
 app/
@@ -615,6 +615,9 @@ app/
   repository.py  # operacje na bazie, jedna sesja na operację
   cache.py       # JsonCache (Redis) — używany od kroku 5
 tests/
+  conftest.py            # fixture client: baza w tmp_path + MemoryRedis
+  test_health.py, test_parking.py        # testy LAB1 (na bazie)
+  test_persistence.py, test_cache.py, test_cache_failure.py   # testy LAB2
 requirements.txt
 README.md
 ```
@@ -748,14 +751,135 @@ Dodatkowo: `test_failed_invalidation_leaves_stale_value_until_ttl`, `test_failed
 
 Reset: `docker exec lab2-redis redis-cli DEL <klucz>` i usunięcie `app.db`. Nie używano `FLUSHALL`/`FLUSHDB`; testy mają własny prefiks.
 
+### Co zachowano, co zmieniono
+
+- **Zachowano z LAB1:** temat (Parking Service), granicę odpowiedzialności, pojęcia domeny, wszystkie endpointy, identyfikatory `int` nadawane przez serwer, format JSON i błędów, kody `404`/`409`/`422`, regułę przejść statusów oraz `create_app()` (teraz z argumentami).
+- **Zmieniono:** magazyn danych (pamięć → SQLite przez SQLAlchemy), dostęp przez repozytorium zamiast `Depends(get_store)`, dodano Redis jako cache jednego odczytu, nagłówek `X-Cache` w `GET /spaces/{id}` oraz opcjonalny `/ready`. Dla klienta API zmieniło się tylko to, że dane przeżywają restart i że jedna odpowiedź ma dodatkowy nagłówek; zmiany wewnętrzne (baza, cache, repozytorium) nie są widoczne w kontrakcie.
+- **Dlaczego:** Parking Service jest właścicielem rejestru miejsc i ich statusów — te dane muszą być trwałe, bo inne usługi na nich polegają. Cache dotyczy odczytu, który jest wołany najczęściej (sprawdzenie miejsca), a jego chwilowa nieaktualność jest akceptowalna (patrz ograniczenia).
+
+### Uruchomienie i testy
+
+Wymagania: Python 3.12+, Docker (Redis). Poniżej polecenia dla macOS/Linux; na Windows zamiast `source` i `export` użyj `.venv\Scripts\activate` i `$env:ZMIENNA = '...'`.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+docker run --name lab2-redis -p 127.0.0.1:6379:6379 -d redis:7-alpine   # kolejne razy: docker start lab2-redis
+docker exec lab2-redis redis-cli ping                                   # PONG
+
+export DATABASE_URL="sqlite:///./app.db"
+export REDIS_URL="redis://localhost:6379/0"
+export CACHE_PREFIX="lab2:<numer_albumu>:parking-service"
+export CACHE_TTL_SECONDS=60
+python -m uvicorn app.main:app --port 8101
+```
+
+Testy: `python -m pytest -q` (nie wymagają Dockera ani zmiennych — fixture ustawia własny prefiks i bazę). Baza to plik `app.db` w katalogu uruchomienia; schemat tworzy `Base.metadata.create_all` przy starcie aplikacji, a dane początkowe trafiają tylko do pustej bazy. W repozytorium nie ma sekretów; pliki `*.db` są w `.gitignore`.
+
+### Dowody — zestawienie
+
+Szczegółowe przebiegi są w opisach kroków 4–7. Wyniki rzeczywiste pochodzą z uruchomień na lokalnym Uvicornie i Redis w Dockerze (`lab2-redis`).
+
+| Scenariusz | Stan początkowy i żądanie | Oczekiwany wynik | Wynik rzeczywisty | Reset |
+|---|---|---|---|---|
+| Zapis i odczyt po restarcie bez cache | świeża baza; `PATCH /spaces/1/status` → `OCCUPIED`, restart Uvicorna, `GET /spaces/1` | `OCCUPIED` odczytany z bazy | zgodny | usunięcie `app.db` |
+| Reguła: sukces i odrzucenie | `FREE→OCCUPIED` → `200`; `OCCUPIED→RESERVED` | `200`, potem `409`, status bez zmian | zgodny (`Niedozwolona zmiana statusu: OCCUPIED -> RESERVED`) | usunięcie `app.db` |
+| MISS → HIT, liczba odczytów bazy | `GET /spaces/1` ×2 | `MISS`, `HIT`; jeden odczyt repozytorium | zgodny (test `test_miss_then_hit_skips_repository`) | `DEL` klucza |
+| Wygaśnięcie TTL | `CACHE_TTL_SECONDS=5`, `GET`, czekanie 6 s, `GET` | `MISS` po wygaśnięciu | zgodny | `DEL` klucza |
+| Zmiana i unieważnienie | `GET` (HIT), `PATCH`, `GET` | `MISS` z nową wartością | zgodny | `DEL` klucza |
+| Awaria GET, SET, DELETE cache | `docker stop lab2-redis`; `GET`, `PATCH` | `200` z `BYPASS`; zmiana zatwierdzona w bazie | zgodny; `GET`/`SET`/`DELETE` w testach przez `fake_redis.down` | `docker start lab2-redis` |
+| Przywrócenie Redis, stara wartość | `docker start lab2-redis`, `GET` | stara wartość z cache do końca TTL | zgodny (`HIT` ze statusem `FREE`, baza miała `RESERVED`, TTL 57 s) | `DEL` klucza |
+
+**Testy.** Cztery własne testy LAB2: trwałość `test_changes_survive_new_app_instance`, HIT/MISS `test_miss_then_hit_skips_repository`, unieważnienie `test_patch_invalidates_cache`, awaria cache `test_read_and_write_work_without_redis` (plus pozostałe w `tests/test_persistence.py`, `tests/test_cache.py`, `tests/test_cache_failure.py`). Testy LAB1 (`tests/test_parking.py`, `tests/test_health.py`) zostały zachowane i działają na bazie w `tmp_path`. Testy automatyczne używają zamiennika `MemoryRedis` (bez TTL); wygasanie, restart procesu i rzeczywisty Redis sprawdzono ręcznie w tabeli powyżej.
+
+### Porównanie i ograniczenia
+
+| Cecha | Pamięć procesu (LAB1) | SQLite | Redis jako cache |
+|---|---|---|---|
+| Rola | dane w procesie | trwały zapis | odtwarzalna kopia odczytu |
+| Restart Uvicorna | zmiany znikają | plik pozostaje | wpis może przeżyć (potwierdzone ręcznie) |
+| Brak danych | stan nieutworzony lub utracony | brak rekordu → `404` | `MISS` jest normalny |
+| Trudność | utrata zmian | schemat, transakcje, błędy | aktualność, TTL, awarie |
+
+- **Co zmieniło się dla klienta, a co wewnątrz?** Dla klienta: dane przeżywają restart i `GET /spaces/{id}` ma nagłówek `X-Cache`. Wewnątrz: baza, repozytorium, transakcje i cache.
+- **Dlaczego baza i cache nie robią z aplikacji systemu mikroserwisowego?** Mikroserwis to granica odpowiedzialności za dane i niezależność wdrożenia, a nie sama obecność bazy. Nadal mamy jeden proces; dopiero druga usługa z własnymi danymi, wołająca Parking Service przez HTTP, tworzy system rozproszony.
+- **Czy druga usługa powinna pisać do tych samych tabel?** Nie. Reservation Service zmienia status miejsca wyłącznie przez `PATCH /spaces/{id}/status`, dzięki czemu reguła przejść i unieważnianie cache pozostają w jednym miejscu. Osobny właściciel danych nie wymaga osobnego serwera — liczy się kontrola zapisu.
+- **Skutki awarii:** *proces aplikacji* — brak odpowiedzi, dane w bazie bezpieczne; *Redis* — usługa działa dalej (`BYPASS`, `/ready` = `degraded`), ale wolniej i z ryzykiem starej wartości po nieudanym unieważnieniu; *baza* — brak możliwości odczytu i zapisu, `/ready` zwraca `503`.
+- **Dopuszczalne opóźnienie dla odbiorcy:** do 60 s (TTL) dla informacji o miejscu. Reservation Service może użyć kopii do wstępnego sprawdzenia, ale **decyzja o rezerwacji musi opierać się na zapisie w bazie** (`PATCH` z regułą przejść zwróci `409`, jeśli miejsce jest już zajęte), a nie na kopii z cache.
+- **Zmiana SQLite → PostgreSQL:** wymaga sterownika (np. `psycopg`), nowego `DATABASE_URL`, sprawdzenia schematu i typów, zachowania kluczy obcych i unikalności (komunikaty błędów inaczej wyglądają — `is_unique_violation` sprawdza tekst `UNIQUE` z SQLite i trzeba go zastąpić kodem błędu Postgresa), migracji (Alembic) oraz ponownego uruchomienia testów. ORM nie gwarantuje pełnej zgodności.
+
+**Ograniczenia spójności:**
+- Commit w bazie i usunięcie klucza w Redis nie są jedną transakcją. Nieudane unieważnienie zostawia starą wartość do końca TTL (pokazane w kroku 6).
+- Przy równoległym zapisie i odczycie możliwy jest wyścig: odczyt z bazy sprzed zmiany może zapisać starą kopię do cache już po unieważnieniu. Prosty cache-aside tego nie wyklucza; skutek ogranicza TTL.
+- `create_all` nie aktualizuje istniejących kolumn; zmiana schematu wymaga migracji (poza zakresem LAB2).
+- Cache obejmuje tylko pojedyncze miejsce; listy z filtrami nie są cache'owane.
+- Użycie cache jest właściwe dla odczytu informacji o miejscu, ale nie dla ostatecznej decyzji o jego zajęciu.
+
+### Dokumentacja i autorzy
+
+Wykorzystano dwa fragmenty oficjalnej dokumentacji (linki otwarte i sprawdzone 2026-11-03).
+
+#### Fragment 1 — SQLAlchemy 2.0, Session Basics
+
+Dokumentacja: <https://docs.sqlalchemy.org/en/20/orm/session_basics.html> — sekcje „Framing out a begin / commit / rollback block” oraz „Using a sessionmaker”.
+
+**Problem:** operacja zmieniająca stan (np. `PATCH` statusu) nie może zostawić częściowego zapisu, gdy reguła lub baza odrzuci żądanie.
+**Rozwiązanie z dokumentacji:** blok `with sessionmaker.begin() as session:` zatwierdza transakcję po udanym wykonaniu, a po wyjątku wywołuje `Session.rollback()`. Sesja jest tworzona na jedną operację.
+
+`app/database.py` (fabryka sesji) i `app/repository.py`:
+
+```python
+return engine, sessionmaker(bind=engine, expire_on_commit=False)
+...
+def update_status(self, space_id, new_status):
+    with self.sessions.begin() as db:
+        row = db.get(ParkingSpaceRow, space_id)
+        if row is None:
+            raise LookupError(f"Space {space_id} not found")
+        current = SpaceStatus(row.status)
+        if new_status not in ALLOWED_TRANSITIONS[current]:
+            raise ValueError(f"Niedozwolona zmiana statusu: ...")
+        row.status = new_status.value
+```
+
+**Sprawdzenie:** `PATCH` `OCCUPIED → RESERVED` daje `409`, a następny `GET` pokazuje nadal `OCCUPIED` (`test_rejected_operations_leave_database_unchanged`); naruszenie unikalności i klucza obcego kończy się wycofaną transakcją (`test_unique_violation_maps_to_409_and_rolls_back`, `test_foreign_key_is_enforced`).
+
+#### Fragment 2 — redis-py, Connecting to Redis
+
+Dokumentacja: <https://redis.readthedocs.io/en/stable/connections.html> — opis klienta `Redis` i jego parametrów `socket_connect_timeout`, `socket_timeout` oraz `retry` (klasa `Retry` i wyjątki są opisane na osobnych stronach tej dokumentacji).
+
+**Problem:** niedostępny Redis nie może blokować żądania ani cofać zatwierdzonej zmiany w bazie; bez limitów czasu połączenie z wyłączonym serwerem wisi domyślnie do 5 s na każde wywołanie.
+**Rozwiązanie z dokumentacji:** krótkie `socket_connect_timeout` i `socket_timeout` oraz ograniczone `retry`; błędy klienta dziedziczą po `RedisError`, więc można je złapać w jednym miejscu.
+
+`app/cache.py`:
+
+```python
+Redis.from_url(url, decode_responses=True,
+               socket_connect_timeout=0.3, socket_timeout=0.3,
+               retry=Retry(NoBackoff(), 0))
+...
+except RedisError:
+    logger.warning("Cache unavailable; reading database")
+    return None, "BYPASS"
+```
+
+**Sprawdzenie:** po `docker stop lab2-redis` `GET /spaces/1` zwraca `200` z `X-Cache: BYPASS`, a `PATCH` kończy się `200` i zmianą w bazie; `/ready` pokazuje `degraded`. Automatycznie: `test_read_and_write_work_without_redis` (`fake_redis.down = True`).
+
+- **Wkład:** Dawid Bajek — projekt, implementacja, testy i dokumentacja usługi.
+- **AI:** korzystano z Claude Code (model Claude Sonnet 5.5) do implementacji kroków 3–8, napisania testów i wersji roboczej README. Weryfikacja: przegląd diffu, uruchomienie 28 testów oraz ręczne próby na lokalnym Redis (tabela dowodów); decyzje o modelu danych, transakcjach i cache zostały przeanalizowane i potrafię je wyjaśnić.
+- **Kolejny etap:** pierwsza usługa (Parking Service) w LAB3 zostanie zarejestrowana i wyszukiwana przez Eurekę. Planowana druga usługa (Reservation Service) zachowuje kontrakt z sekcji 2: sprawdza miejsce i zmienia jego status przez `PATCH /spaces/{id}/status`, z timeoutem 2 s, dwoma ponowieniami i `503` przy niedostępnym Parking Service. Własne dane (`reservations`) trzyma we własnej bazie; po zmianie statusu Parking Service unieważnia wpis cache miejsca.
+
 ## 7. Stos technologiczny i struktura repozytorium
 
 | Element | Technologia |
 |---------|-------------|
 | Mikrousługi | Python + FastAPI |
 | Walidacja | Pydantic |
-| Baza danych | PostgreSQL (osobna baza/schemat dla usługi) |
+| Baza danych | SQLite w LAB2 (plik `app.db`); PostgreSQL planowany w kolejnych etapach (osobna baza/schemat dla usługi) |
 | ORM | SQLAlchemy |
+| Cache | Redis (cache-aside, TTL) |
 | Komunikacja | REST API; RabbitMQ dla zdarzeń (`VehicleEntered`, `ParkingSessionEnded`, `PaymentConfirmed`) — w późniejszych etapach |
 | Uruchamianie | Docker + Docker Compose |
 | Testy | pytest + httpx |
