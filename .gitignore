@@ -13,4 +13,6 @@ __pycache__/
 *.db-wal
 *.db-shm
 
+.DS_Store
+
 LAB2-INSTRUKCJA.md
