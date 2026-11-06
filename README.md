@@ -5,15 +5,18 @@ Główny cel: pokazać jeden proces biznesowy realizowany przez współpracując
 
 ## Spis treści
 
-1. [Docelowy system](#1-docelowy-system)
-2. [Granica odpowiedzialności usług](#2-granica-odpowiedzialności-usług)
-3. [Model danych](#3-model-danych-parking-service)
-4. [API Parking Service](#4-api-parking-service)
-5. [Implementacja LAB1](#5-implementacja-lab1)
-6. [Implementacja LAB2 (baza i cache)](#6-implementacja-lab2-baza-i-cache)
-7. [Stos technologiczny i struktura repozytorium](#7-stos-technologiczny-i-struktura-repozytorium)
+1. [Docelowy system](#system)
+2. [Granica odpowiedzialności usług](#granice-uslug)
+3. [Model danych](#parking-model)
+4. [API Parking Service](#parking-api)
+5. [Parking Service — LAB1](#parking-lab1)
+6. [Parking Service — LAB2 (baza i cache)](#parking-lab2)
+7. [Stos technologiczny i struktura repozytorium](#struktura)
+8. [Parking Session Service — LAB1](#session-lab1)
 
 ---
+
+<a id="system"></a>
 
 ## 1. Docelowy system
 
@@ -33,6 +36,8 @@ Przepływ biznesowy:
 5. Po potwierdzeniu płatności miejsce zostaje zwolnione.
 
 ---
+
+<a id="granice-uslug"></a>
 
 ## 2. Granica odpowiedzialności usług
 
@@ -101,6 +106,8 @@ Odpowiedzi błędów: `404` (miejsce nie istnieje), `409` (miejsce jest już `RE
 - Jeśli nadal brak odpowiedzi — **nie zapisuje rezerwacji** i zwraca klientowi `503 Service Unavailable` z `{"detail": "Parking Service niedostępny"}`. Dzięki temu nie powstaje rezerwacja miejsca, które nie zostało zablokowane.
 - `409` od Parking Service oznacza „miejsce zajęte” i jest przekazywane klientowi jako `409`.
 
+<a id="architektury"></a>
+
 ### Trzy warianty architektury
 
 **Wariant A — aplikacja monolityczna**
@@ -152,13 +159,23 @@ Klient
 
 Każda usługa to osobny proces z własną bazą; usługi wołają się nawzajem przez HTTP (np. Reservation Service → Parking Service).
 
+| Pytanie | Monolit | Modularny monolit | Mikrousługi |
+|---|---|---|---|
+| Wspólne wdrażanie wszystkich funkcji | Tak | Tak | Możliwe niezależne wdrożenia |
+| Komunikacja komponentów | Funkcje w procesie | Interfejsy modułów w procesie | Sieć, np. HTTP |
+| Procesy | Jeden | Jeden | Osobny dla każdej usługi |
+| Awaria procesu | Obejmuje całą aplikację | Obejmuje całą aplikację | Dotyczy usługi i może wpłynąć na jej odbiorców |
+| Własność danych | Wspólna aplikacja | Wyznaczona modułami | Wyznaczona usługami |
+
 ### Checkpoint przed kodowaniem
 
 - **Zakres pierwszej usługi:** rejestr parkingów i miejsc oraz ich statusów.
 - **Rola drugiej:** Reservation Service rezerwuje miejsca na czas i prosi Parking Service o zmianę statusu.
-- **Reguła pierwszej usługi:** miejsca zajętego (`OCCUPIED`) nie można zarezerwować; dozwolone są tylko określone przejścia statusów (patrz [sekcja 3](#reguła-biznesowa-przejścia-statusów-miejsca)).
+- **Reguła pierwszej usługi:** miejsca zajętego (`OCCUPIED`) nie można zarezerwować; dozwolone są tylko określone przejścia statusów (patrz [sekcja 3](#statusy-miejsc)).
 
 ---
+
+<a id="parking-model"></a>
 
 ## 3. Model danych (Parking Service)
 
@@ -186,6 +203,8 @@ Decyzje projektowe:
 - **Dwa modele**, bo parking i miejsce mają różny cykl życia: parking zmienia się rzadko, status miejsca często.
 - Status przy tworzeniu miejsca zawsze `FREE`; klient nie może utworzyć miejsca od razu jako `OCCUPIED`.
 
+<a id="statusy-miejsc"></a>
+
 ### Reguła biznesowa: przejścia statusów miejsca
 
 Status zmienia się tylko według poniższej tabeli (dotyczy wyłącznie danych Parking Service, więc da się ją sprawdzić bez drugiej usługi):
@@ -205,6 +224,8 @@ Dodatkowo: ustawienie tego samego statusu, który miejsce już ma, jest konflikt
 - **Niepoprawna wartość** statusu (np. `"BROKEN"`) → `422`.
 
 ---
+
+<a id="parking-api"></a>
 
 ## 4. API Parking Service
 
@@ -378,9 +399,11 @@ Błędy:
 
 ---
 
+<a id="parking-lab1"></a>
+
 ## 5. Implementacja LAB1
 
-Zaimplementowana jest tylko pierwsza usługa — **Parking Service** (FastAPI). Pozostałe usługi są wyłącznie zaprojektowane.
+Ta sekcja opisuje wersję LAB1 usługi **Parking Service** (FastAPI). Dokumentacja LAB1 usługi **Parking Session Service** znajduje się w sekcji 8.
 
 ### Uruchomienie
 
@@ -461,6 +484,8 @@ Fixture `client` w `tests/conftest.py` tworzy **świeżą aplikację przez `crea
 Testy sprawdzają kod HTTP oraz istotne pola JSON. Testy odrzuceń (`422`, `409`) dodatkowo potwierdzają osobnym `GET`, że stan magazynu się nie zmienił.
 
 Restart procesu i prawdziwy port są sprawdzane osobno, ręcznie (`TestClient` nie uruchamia Uvicorna).
+
+<a id="parking-restart"></a>
 
 ### Eksperyment z restartem
 
@@ -561,6 +586,8 @@ space.status = body.status
 
 **Sprawdzenie:** `GET /spaces/99` daje `404` z `{"detail": "Space 99 not found"}` (`test_missing_resources_return_404`); `OCCUPIED → RESERVED` daje `409`, a następny `GET` pokazuje nadal `OCCUPIED` (`test_occupied_space_cannot_be_reserved`).
 
+<a id="parking-lab2"></a>
+
 ## 6. Implementacja LAB2 (baza i cache)
 
 LAB2 rozwija **tę samą usługę** (Parking Service): dane z pamięci procesu przechodzą do bazy SQLite (SQLAlchemy), a wybrany odczyt dostaje cache w Redis (cache-aside). **Kontrakt API z sekcji 4 nie zmienia się** — te same metody, ścieżki, identyfikatory, JSON i kody błędów (`404`, `409`, `422`).
@@ -579,7 +606,7 @@ Sekcja opisuje kolejno: stan początkowy, model danych, podłączenie bazy, oper
 
 ### Krok 1 — stan początkowy
 
-Przed zmianami uruchomiono testy LAB1 (`python -m pytest -q`) oraz usługę (`python -m uvicorn app.main:app --port 8101`). Zmiany danych przez API były widoczne w kolejnych `GET`, ale **po restarcie procesu znikały** — szczegółowy przebieg i zrzuty ekranu: [Eksperyment z restartem](#eksperyment-z-restartem). To jest problem, który rozwiązuje LAB2. W LAB1 nie było żadnej bazy ani pliku z danymi, więc nie ma istniejącej persystencji do opisania.
+Przed zmianami uruchomiono testy LAB1 (`python -m pytest -q`) oraz usługę (`python -m uvicorn app.main:app --port 8101`). Zmiany danych przez API były widoczne w kolejnych `GET`, ale **po restarcie procesu znikały** — szczegółowy przebieg i zrzuty ekranu: [Eksperyment z restartem](#parking-restart). To jest problem, który rozwiązuje LAB2. W LAB1 nie było żadnej bazy ani pliku z danymi, więc nie ma istniejącej persystencji do opisania.
 
 ### Krok 2 — model danych i decyzje
 
@@ -871,6 +898,8 @@ except RedisError:
 - **AI:** korzystano z Claude Code (model Claude Sonnet 5.5) do implementacji kroków 3–8, napisania testów i wersji roboczej README. Weryfikacja: przegląd diffu, uruchomienie 28 testów oraz ręczne próby na lokalnym Redis (tabela dowodów); decyzje o modelu danych, transakcjach i cache zostały przeanalizowane i potrafię je wyjaśnić.
 - **Kolejny etap:** pierwsza usługa (Parking Service) w LAB3 zostanie zarejestrowana i wyszukiwana przez Eurekę. Planowana druga usługa (Reservation Service) zachowuje kontrakt z sekcji 2: sprawdza miejsce i zmienia jego status przez `PATCH /spaces/{id}/status`, z timeoutem 2 s, dwoma ponowieniami i `503` przy niedostępnym Parking Service. Własne dane (`reservations`) trzyma we własnej bazie; po zmianie statusu Parking Service unieważnia wpis cache miejsca.
 
+<a id="struktura"></a>
+
 ## 7. Stos technologiczny i struktura repozytorium
 
 | Element | Technologia |
@@ -881,11 +910,11 @@ except RedisError:
 | ORM | SQLAlchemy |
 | Cache | Redis (cache-aside, TTL) |
 | Komunikacja | REST API; RabbitMQ dla zdarzeń (`VehicleEntered`, `ParkingSessionEnded`, `PaymentConfirmed`) — w późniejszych etapach |
-| Uruchamianie | Docker + Docker Compose |
+| Uruchamianie | Uvicorn dla usług Python, Docker dla Redis; Docker Compose w planowanej strukturze docelowej |
 | Testy | pytest + httpx |
 | Dokumentacja | Swagger UI / OpenAPI (`/docs`) |
 
-Planowana struktura docelowa (na LAB1 istnieje tylko kod Parking Service w `app/`):
+Obecnie Parking Service znajduje się w głównym `app/`, a Parking Session Service w `services/parking-session-service/`. Wspólna dokumentacja znajduje się w tym pliku. Poniżej przedstawiono planowaną strukturę docelową:
 
 ```
 parkivo/
@@ -899,3 +928,219 @@ parkivo/
   tests/
   README.md
 ```
+
+<a id="session-lab1"></a>
+
+## 8. Parking Session Service — LAB1
+
+Usługa Parkivo rejestruje wjazdy i wyjazdy pojazdów. Zapisuje czas postoju i pilnuje, aby jedno miejsce miało najwyżej jedną aktywną sesję. Implementacja LAB1 korzysta z FastAPI i magazynu w pamięci procesu.
+
+### Zakres i podział odpowiedzialności
+
+Podział pracy i granice usług opisano w [sekcji 1](#system) oraz [sekcji 2](#granice-uslug). Session Service jest właścicielem sesji, tablic rejestracyjnych i czasów postoju. Obecny etap przyjmuje dodatni `space_id` i sprawdza aktywne sesje lokalnie. Weryfikacja istnienia miejsca i uprawnienia z rezerwacji wymaga przyszłej integracji.
+
+Sesja oznacza jeden postój pojazdu na miejscu. Aktywna sesja ma `ended_at = null`. Zakończona sesja ma zapisany czas wyjazdu. Identyfikator sesji `id` i identyfikator miejsca `space_id` opisują różne zasoby.
+
+### Uruchomienie
+
+Wymagany jest Python 3.10 lub nowszy. Polecenia dla macOS/Linux, wykonywane od głównego katalogu repozytorium:
+
+```bash
+cd services/parking-session-service
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --port 8103
+```
+
+W PowerShell aktywacja środowiska odbywa się poleceniem `.venv\Scripts\Activate.ps1`.
+
+Swagger jest dostępny pod adresem [http://127.0.0.1:8103/docs](http://127.0.0.1:8103/docs). Podczas pracy nad kodem można dodać `--reload`, co powoduje restart przy zmianach plików. Eksperyment z restartem należy wykonać powyższą komendą, z ręcznym zatrzymaniem przez Ctrl+C.
+
+Testy uruchamia się z katalogu tej usługi przy aktywnym środowisku:
+
+```bash
+python -m pytest -q
+```
+
+### Struktura i przechowywanie danych
+
+```text
+app/
+  __init__.py
+  main.py       # create_app(), endpointy i reguły biznesowe
+  models.py     # modele Pydantic
+  store.py      # słownik sesji i licznik identyfikatorów
+tests/
+  conftest.py    # świeża aplikacja dla każdego testu
+  test_sessions.py
+requirements.txt
+```
+
+`create_app()` tworzy jeden `SessionStore` dla danej aplikacji. Endpointy korzystają z tego samego obiektu, dlatego zapis jest widoczny w kolejnych żądaniach. Start aplikacji tworzy pusty słownik. Serwer nadaje identyfikatory kolejno od `0`. `Lock` chroni sprawdzenie aktywnej sesji i zapis przed jednoczesnym wykonaniem przez wątki tego samego procesu.
+
+Restart usuwa dane oraz zeruje licznik. Osobne procesy i instancje aplikacji mają osobne magazyny. Ten etap należy uruchamiać jako jeden proces roboczy. Trwałość danych, wspólny stan wielu instancji i integracja usług są dalszymi etapami projektu.
+
+### Model danych
+
+| Pole | Typ i zasady |
+|---|---|
+| `id` | Liczba całkowita nadawana przez serwer, od 0 |
+| `space_id` | Dodatnia liczba całkowita, wymagana w żądaniu |
+| `vehicle_plate` | Wymagany tekst, co najmniej jeden znak po usunięciu skrajnych spacji |
+| `started_at` | Czas UTC nadawany przez serwer podczas tworzenia sesji |
+| `ended_at` | Początkowo `null`, po zakończeniu czas UTC nadany przez serwer |
+
+Żądanie tworzenia korzysta z `SessionCreate`, a odpowiedź z `ParkingSession`. Pola identyfikatora i czasów wyznacza serwer. Aktualna konfiguracja modeli ignoruje dodatkowe pola wejściowe. Format tablicy poza niepustością pozostaje dowolny.
+
+### API i przykłady
+
+| Metoda | Ścieżka | Znaczenie | Sukces | Błędy |
+|---|---|---|---|---|
+| GET | `/health` | Stan działania | 200 | — |
+| POST | `/sessions` | Rozpoczęcie postoju | 201 | 409, 422 |
+| GET | `/sessions` | Lista wszystkich sesji | 200 | — |
+| GET | `/sessions/{session_id}` | Szczegóły jednej sesji | 200 | 404, 422 |
+| POST | `/sessions/{session_id}/end` | Zakończenie postoju | 200 | 404, 409, 422 |
+
+`GET /health` zwraca `{"status":"ok","service":"parking-session-service"}`. Lista bez sesji zwraca `200` z `[]`.
+
+Przykładowe żądanie `POST /sessions`:
+
+```json
+{"space_id": 1, "vehicle_plate": "RKR12345"}
+```
+
+Przykładowa odpowiedź `201` na świeżo uruchomionym serwerze (czas jest ilustracyjny):
+
+```json
+{
+  "id": 0,
+  "space_id": 1,
+  "vehicle_plate": "RKR12345",
+  "started_at": "2026-11-06T10:00:00Z",
+  "ended_at": null
+}
+```
+
+`GET /sessions/0` zwraca `200` z tym obiektem, a `GET /sessions` zwraca listę zawierającą ten obiekt. `POST /sessions/0/end` przyjmuje żądanie bez ciała i zwraca `200` z tym samym obiektem, którego `ended_at` zawiera czas zakończenia. Po zakończeniu można utworzyć kolejną sesję dla miejsca 1, z nowym identyfikatorem.
+
+#### Reguły biznesowe i błędy
+
+Dla jednego miejsca może istnieć najwyżej jedna aktywna sesja. Pierwszy wjazd na miejsce 1 jest dozwolony. Kolejny wjazd przed zakończeniem poprzedniej sesji daje `409` z `{"detail":"Miejsce ma juz aktywną sesję"}`. Odrzucenie następuje przed zapisem.
+
+Zakończenie aktywnej sesji ustawia czas wyjazdu. Ponowne zakończenie daje `409` z `{"detail":"Sesja jest juz zakończona"}` i zachowuje poprzedni czas.
+
+Brak sesji przy odczycie lub zakończeniu daje `404` z `{"detail":"Sesja nie istnieje"}`. Błędne dane, np. `space_id = -1`, pusta tablica lub tekst zamiast liczbowego identyfikatora w ścieżce, dają `422`. FastAPI zwraca wtedy listę szczegółów w `detail`, wskazującą m.in. pole i przyczynę walidacji. Test sprawdza dla ujemnego `space_id` położenie błędu `loc = ["body", "space_id"]`.
+
+`201` oznacza utworzenie zasobu, `200` poprawny odczyt lub zakończenie, `404` brak zasobu, `409` konflikt z bieżącym stanem, a `422` niepoprawne dane wejściowe.
+
+### Testy automatyczne i wynik
+
+Fixture `client` tworzy aplikację przez `create_app()` osobno dla każdego testu. `TestClient` wywołuje API wewnątrz procesu testowego. Każdy test zaczyna z pustym magazynem i może działać samodzielnie.
+
+| Test | Sprawdzany scenariusz |
+|---|---|
+| `test_create_session` | Kod 201 i pola nowej sesji |
+| `test_read_sessions_list` | Lista zawiera utworzoną sesję |
+| `test_read_session` | Osobny GET potwierdza zapis |
+| `test_worong_space_id` | Kod 422, wskazanie pola i pusty magazyn po odrzuceniu |
+| `test_cannot_create_two_active_sessions_for_same_space` | Kod 409, komunikat i zachowanie pierwotnej sesji |
+| `test_session_end` | Ustawienie czasu wyjazdu potwierdzone osobnym GET |
+| `test_cannot_end_twice_same_session` | Kod 409 i zachowanie danych po drugim zakończeniu |
+| `test_new_session_at_same_place` | Nowy wjazd po zakończeniu, nowe ID i odczyt nowej sesji |
+| `test_session_dont_exist` | Kod 404 i komunikat przy odczycie oraz zakończeniu |
+| `test_health` | Kod 200 i nazwa usługi |
+
+Weryfikacja przez asystenta 6 listopada 2026 r. dała **10 passed, 1 warning**. Wykorzystano istniejące środowisko `.venv` głównego repozytorium, uruchamiając z katalogu usługi:
+
+```bash
+../../.venv/bin/python -B -m pytest -q -p no:cacheprovider
+```
+
+Środowisko weryfikacji miało Python 3.14.3, FastAPI 0.161.1, Pydantic 2.14.1, pytest 8.4.2, httpx 0.28.1 i Uvicorn 0.54.0. Ostrzeżenie dotyczy przestarzałego aliasu `BlockingPortal` używanego przez Starlette. `requirements.txt` zawiera nazwy pakietów bez przypiętych wersji, więc nowa instalacja może pobrać inne wersje. Uruchomienie w świeżym środowisku wymaga osobnego sprawdzenia przed oddaniem.
+
+### Weryfikacja HTTP i restartu — wykonana
+
+Eksperyment wykonał asystent 6 listopada 2026 r., w godzinach 13:17–13:18 czasu Europe/Warsaw. Żądania wysłano przez `curl` do rzeczywistego procesu Uvicorn. Wybrano osobny port **18103** dla eksperymentu. Dowodem są poniższe zapisane odpowiedzi HTTP i identyfikatory procesów. Screenów ze Swaggera nie wykonywano.
+
+Serwer uruchomiono z katalogu `services/parking-session-service`, wykorzystując istniejące środowisko głównego repozytorium:
+
+```bash
+../../.venv/bin/python -m uvicorn app.main:app --port 18103
+```
+
+| Krok | Żądanie lub czynność | Oczekiwany wynik | Rzeczywisty wynik |
+|---|---|---|---|
+| 1 | GET `/health` | 200 i nazwa usługi | 200, `{"status":"ok","service":"parking-session-service"}` |
+| 2 | GET `/sessions` przed zapisem | 200, pusta lista | 200, `[]` |
+| 3 | POST `/sessions` z `{"space_id":1,"vehicle_plate":"RKR12345"}` | 201, id 0, ended_at null | 201, id 0, started_at `2026-11-06T12:17:46.841243Z`, ended_at null |
+| 4 | GET `/sessions` i GET `/sessions/0` | 200, zapisana sesja | Oba 200, lista zawiera jedną sesję, szczegóły zgodne z POST |
+| 5 | Ctrl+C i ponowne uruchomienie tą samą komendą | Zakończenie starego i start nowego procesu | Proces 87995 zakończony, nowy proces 88160 uruchomiony |
+| 6 | GET `/sessions` po restarcie | 200, pusta lista | 200, `[]` |
+| 7 | GET `/sessions/0` po restarcie | 404, komunikat o braku sesji | 404, `{"detail":"Sesja nie istnieje"}` |
+
+Polecenia wykonane przed restartem:
+
+```bash
+curl -i http://127.0.0.1:18103/health
+curl -i http://127.0.0.1:18103/sessions
+curl -i -X POST http://127.0.0.1:18103/sessions -H 'Content-Type: application/json' -d '{"space_id":1,"vehicle_plate":"RKR12345"}'
+curl -i http://127.0.0.1:18103/sessions
+curl -i http://127.0.0.1:18103/sessions/0
+```
+
+Odpowiedź POST i późniejszego GET szczegółów zawierała ten sam obiekt:
+
+```json
+{
+  "space_id": 1,
+  "vehicle_plate": "RKR12345",
+  "id": 0,
+  "started_at": "2026-11-06T12:17:46.841243Z",
+  "ended_at": null
+}
+```
+
+Po restarcie powtórzono dwa ostatnie polecenia. Odpowiedzi wynosiły:
+
+```http
+HTTP/1.1 200 OK
+content-type: application/json
+
+[]
+```
+
+```http
+HTTP/1.1 404 Not Found
+content-type: application/json
+
+{"detail":"Sesja nie istnieje"}
+```
+
+Żądania korzystały ze wspólnego słownika w działającej aplikacji, więc osobny GET widział zapis. Zakończenie procesu usunęło jego pamięć. Nowy proces utworzył nowy `SessionStore`, dlatego sesja z poprzedniego uruchomienia zniknęła. W trakcie eksperymentu kod pozostawał bez edycji, a serwer działał bez opcji `--reload`.
+
+Reset danych zapewnił restart procesu. Po ostatnim odczycie proces eksperymentalny 88160 również zakończono przez Ctrl+C.
+
+### Planowany kontrakt Session Service i Billing Service
+
+Proponowany scenariusz integracji do uzgodnienia przy realizacji Billing Service polega na wystawieniu rachunku za zakończony postój. Billing jest nadawcą `GET /sessions/{session_id}`, a Session Service odbiorcą. Parametr wskazuje sesję do rozliczenia. Odpowiedź 200 ma strukturę pokazaną w sekcji API. Billing pobiera `started_at` i `ended_at` oraz oblicza opłatę według własnego cennika. Każda usługa zapisuje wyłącznie swoje dane.
+
+Planowana obsługa błędów w Billing obejmuje odmowę wystawienia rachunku dla sesji aktywnej (409), przekazanie informacji o brakującej sesji (404) oraz odpowiedź 503 przy timeout lub niedostępności Session Service. Proponowany timeout wynosi 2 sekundy. Przy nieudanym pobraniu danych rachunek powinien pozostać niewystawiony. Kontrakt opisuje przyszłą integrację.
+
+### Rola Session Service w architekturze
+
+Wspólne schematy i porównanie wariantów znajdują się w [sekcji 2](#architektury).
+
+Session Service może stanowić mikroserwis, ponieważ ma odrębną odpowiedzialność, własny stan i API oraz daje się uruchomić jako osobny proces. Klasy `SessionStore` i `ParkingSession` są wewnętrznymi elementami tej usługi. W wariancie monolitycznym sesje byłyby obsługiwane we wspólnej aplikacji z parkingami, rezerwacjami i billingiem. Podział na mikrousługi daje niezależne uruchamianie i wdrażanie, ale wymaga kontraktów sieciowych, obsługi awarii zależności i koordynowania operacji obejmujących kilka usług.
+
+### Dokumentacja techniczna i weryfikacja
+
+1. Modele ciała żądania. Problemem było przyjmowanie i sprawdzanie danych wjazdu. Zastosowano model `SessionCreate` dziedziczący po `BaseModel` oraz parametr `payload: SessionCreate` w endpointzie. Test `test_worong_space_id` potwierdza odrzucenie danych i brak zapisu, a `test_create_session` potwierdza poprawną ścieżkę. [FastAPI — Request Body](https://fastapi.tiangolo.com/tutorial/body/)
+2. Testowanie API. Problemem było powtarzalne wykonywanie żądań podczas testów. Zastosowano `TestClient`, przesyłanie `json=payload` oraz asercje kodu i JSON odpowiedzi. Fixture tworzy świeżą aplikację przez `create_app()`. Wynik uruchomienia 10 testów zapisano powyżej. [FastAPI — Testing](https://fastapi.tiangolo.com/tutorial/testing/)
+
+### Autorstwo i wykorzystanie AI
+
+Osoba 2 — **DO UZUPEŁNIENIA imię i nazwisko** — implementacja Parking Session Service i testów. Zakres osoby 1 obejmuje Parking Service oraz planowany Reservation Service zgodnie z podziałem w sekcji 1.
+
+W pracy wykorzystano asystenta AI do objaśniania FastAPI i pytest, proponowania fragmentów kodu, przeglądu błędów, uruchamiania testów i przygotowania tej dokumentacji. Weryfikacja obejmowała przegląd odpowiedzi API, poprawianie warunków kończenia sesji oraz testy kodów HTTP, danych i zachowania stanu po odrzuceniu operacji. Przykładowo wykryto odwrócone warunki `is None` / `is not None` i błędną metodę HTTP w teście. Asystent wykonał także eksperyment z restartem rzeczywistego procesu Uvicorn i zapisał otrzymane odpowiedzi HTTP w sekcji weryfikacji restartu.
