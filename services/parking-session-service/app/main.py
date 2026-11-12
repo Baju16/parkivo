@@ -2,24 +2,37 @@ import os
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from redis import RedisError
+
 
 from app.models import SessionCreate, ParkingSession
 from app.database import Base, make_database
 from app.repository import ParkingSessionsRepository
+from app.cache import make_redis, JsonCache
 
-def create_app(database_url: str | None = None) -> FastAPI:
+def create_app(database_url: str | None = None, redis_client=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         url = database_url or os.getenv("DATABASE_URL", "sqlite:///./sessions.db")
         engine, sessions = make_database(url)
 
+        client = redis_client
+
         try:
+            if client is None:
+                client = make_redis(os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"))
+
             Base.metadata.create_all(engine)
             app.state.repository = ParkingSessionsRepository(sessions)
+            app.state.cache = JsonCache(client, prefix=os.environ["CACHE_PREFIX"], resource_name="session", ttl=int(os.getenv("CACHE_TTL_SECONDS", "60")))
             yield
         finally:
-            engine.dispose()
+            try:
+                if redis_client is None and client is not None:
+                    client.close()
+            finally:
+                engine.dispose()
 
     app = FastAPI(title="Parking Session Service", lifespan=lifespan)
 
@@ -42,22 +55,40 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
 
     @app.get("/sessions/{session_id}", response_model=ParkingSession)
-    def get_session(session_id: int):
+    def get_session(session_id: int, response: Response):
+        cache = app.state.cache
+        cached, source = cache.get(session_id)
+
+        if cached is not None:
+            response.headers["X-Cache"] = "HIT"
+            return cached
+
         try:
-            return app.state.repository.get_by_id(session_id)
+            session = app.state.repository.get_by_id(session_id)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        payload = ParkingSession.model_validate(session).model_dump(mode="json")
+
+        if source == "MISS":
+            if not cache.put(session_id, payload):
+                source = "BYPASS"
+
+        response.headers["X-Cache"] = source
+        return payload
 
 
     @app.post("/sessions/{session_id}/end", response_model=ParkingSession)
     def end_session(session_id: int):
         try:
-            return app.state.repository.end_session(session_id)
+            ended = app.state.repository.end_session(session_id)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        
+        app.state.cache.delete(session_id)
+        return ended
+
     return app
 
 app = create_app()
