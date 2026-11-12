@@ -13,6 +13,7 @@ Główny cel: pokazać jeden proces biznesowy realizowany przez współpracując
 6. [Parking Service — LAB2 (baza i cache)](#parking-lab2)
 7. [Stos technologiczny i struktura repozytorium](#struktura)
 8. [Parking Session Service — LAB1](#session-lab1)
+9. [Parking Session Service — LAB2](#session-lab2)
 
 ---
 
@@ -1141,6 +1142,138 @@ Session Service może stanowić mikroserwis, ponieważ ma odrębną odpowiedzial
 
 ### Autorstwo i wykorzystanie AI
 
-Osoba 2 — **DO UZUPEŁNIENIA imię i nazwisko** — implementacja Parking Session Service i testów. Zakres osoby 1 obejmuje Parking Service oraz planowany Reservation Service zgodnie z podziałem w sekcji 1.
+Krzysztof Dąbrowski — implementacja Parking Session Service i testów.
 
 W pracy wykorzystano asystenta AI do objaśniania FastAPI i pytest, proponowania fragmentów kodu, przeglądu błędów, uruchamiania testów i przygotowania tej dokumentacji. Weryfikacja obejmowała przegląd odpowiedzi API, poprawianie warunków kończenia sesji oraz testy kodów HTTP, danych i zachowania stanu po odrzuceniu operacji. Przykładowo wykryto odwrócone warunki `is None` / `is not None` i błędną metodę HTTP w teście. Asystent wykonał także eksperyment z restartem rzeczywistego procesu Uvicorn i zapisał otrzymane odpowiedzi HTTP w sekcji weryfikacji restartu.
+
+<a id="session-lab2"></a>
+
+## 9. Parking Session Service — LAB2 (baza i cache)
+
+W LAB1 sesje przechowywano w pamięci aplikacji. W LAB2 przeniesiono je do SQLite, aby po restarcie można było odczytać czas wjazdu i zakończyć rozpoczęty postój. Do odczytu szczegółów sesji zastosowano Redis.
+
+### Zmiany względem LAB1
+
+| Element | LAB1 | LAB2 |
+|---|---|---|
+| Magazyn sesji | Słownik w pamięci procesu | Tabela `parking_sessions` w SQLite |
+| Restart Uvicorna | Nowy proces zaczyna z pustą listą | Nowy proces otwiera ten sam plik bazy |
+| Odczyt szczegółów | Odczyt ze słownika | Cache-aside z Redis i nagłówkiem `X-Cache` |
+
+### Krok 1 — stan początkowy
+
+Punktem wyjścia był wynik z LAB1. Przed restartem `GET /sessions/0` zwracał sesję, a po restarcie ten sam adres dawał 404. W teście trwałości LAB2 odczyt jest wykonywany dla tego samego identyfikatora przed zamknięciem aplikacji i po jej ponownym uruchomieniu. [Wyniki LAB1](#session-lab1)
+
+### Krok 2 — model danych i decyzje
+
+| Pytanie | Decyzja |
+|---|---|
+| Kto zapisuje dane? | Parking Session Service odpowiada za wjazd, wyjazd, numer miejsca i tablicę pojazdu. |
+| Co identyfikuje postój? | Kluczem głównym jest `id`. Pierwsza sesja w pustej tabeli otrzymuje ID 0. |
+| Co oznacza aktywną sesję? | `ended_at IS NULL`. Częściowy unikalny indeks na `space_id` obejmuje aktywne sesje. Po wyjeździe kolejne auto może skorzystać z tego miejsca. |
+| Jakie dane sprawdza baza? | Ograniczenie `CHECK (space_id > 0)` sprawdza numer miejsca, a indeks wymusza jeden aktywny postój również przy równoczesnych wjazdach. |
+
+### Krok 3 — podłączenie bazy
+
+Obsługę połączenia z bazą skonfigurowano w `lifespan`. Przy starcie aplikacji wywoływane są `make_database()` oraz `Base.metadata.create_all(engine)`, które przygotowują połączenie i brakujące tabele. Każda operacja repozytorium korzysta z własnej sesji SQLAlchemy. Przy zamykaniu aplikacji `engine.dispose()` zwalnia połączenia. [Konfiguracja bazy](services/parking-session-service/app/database.py) · [Model tabeli](services/parking-session-service/app/db_models.py)
+
+### Krok 4 — operacje i reguła w bazie
+
+| Operacja | Zmiana danych i wynik |
+|---|---|
+| Rozpoczęcie postoju | INSERT ustawia czas wjazdu w UTC. Sukces daje 201. Konflikt indeksu dla aktywnego miejsca daje 409 i wycofanie transakcji. |
+| Zakończenie postoju | UPDATE ustawia czas wyjazdu tylko dla podanego ID z pustym `ended_at`. Brak sesji daje 404, powtórny wyjazd daje 409 i zachowuje czas pierwszego zakończenia. |
+| Lista i szczegóły | Lista jest sortowana po ID. Szczegóły zawierają ten sam identyfikator i czasy UTC co odpowiedź zapisu. |
+
+### Krok 5 — cache-aside dla `GET /sessions/{session_id}`
+
+Odpowiedź dla `GET /sessions/{session_id}` jest zapisywana w Redis pod kluczem `<CACHE_PREFIX>:session:<id>` jako JSON z datami w postaci tekstowej. Lista postojów pochodzi z SQLite. Przy odczycie pojedynczego postoju nagłówek `X-Cache` wskazuje sposób obsługi żądania.
+
+| X-Cache | Przebieg żądania |
+|---|---|
+| MISS | Brak wpisu. Repozytorium pobiera sesję z SQLite, a aplikacja zapisuje odpowiedź w Redis z TTL. |
+| HIT | Redis zwraca kopię. Aplikacja pomija odczyt z repozytorium. |
+| BYPASS | Operacja odczytu lub zapisu cache zawiodła. Klient otrzymuje dane z SQLite. |
+
+Czas wyjazdu jest zapisywany w SQLite. Po zatwierdzeniu transakcji usuwany jest klucz z Redis, dzięki czemu kolejny GET pobiera aktualne `ended_at`.
+
+### Krok 6 — awaria cache
+
+Przy błędzie połączenia z Redis odczyt przechodzi do SQLite. Jeśli w czasie awarii kierowca kończy postój, czas wyjazdu pozostaje zapisany w bazie. Gdy usunięcie starego wpisu zawiedzie, po powrocie Redis klient może zobaczyć wcześniejsze `ended_at: null` aż do wygaśnięcia TTL.
+
+### Krok 7 — testy
+
+Każdy test ma własny plik SQLite w katalogu tymczasowym. Do symulacji awarii cache wykorzystano atrapę Redis. 12 listopada 2026 r. zestaw zakończył się wynikiem **15 passed, 1 warning**. Ostrzeżenie pochodziło z biblioteki Starlette.
+
+| Scenariusz LAB2 | Co sprawdzono |
+|---|---|
+| Trwałość sesji | Druga instancja aplikacji otwiera ten sam plik bazy z nowym, pustym cache. GET zwraca sesję zapisaną przez pierwszą instancję. |
+| MISS i HIT | Dwa odczyty zwracają te same dane. Repozytorium jest wywołane raz, a przy zapisie przekazano TTL 60 sekund. |
+| Unieważnienie | Po zapełnieniu cache i zakończeniu postoju kolejny GET daje MISS i zwraca zapisany czas wyjazdu. |
+| Awaria Redis | Podczas symulowanej awarii utworzenie i zakończenie sesji działają, a GET zwraca zatwierdzone dane i BYPASS. |
+| Konfiguracja klienta | Przy starcie aplikacja przekazuje skonfigurowany REDIS_URL do fabryki klienta. |
+
+Pozostałe 10 testów sprawdza kontrakt API z LAB1. Atrapa zapisuje przekazany TTL. Wygaśnięcie klucza na serwerze Redis potwierdzono w kroku 3 zestawienia dowodów. [Test trwałości](services/parking-session-service/tests/test_persistence.py) · [Testy cache](services/parking-session-service/tests/test_cache.py)
+
+### Uruchomienie i testy
+
+W macOS i Linuxie przygotowanie środowiska rozpoczyna się w głównym katalogu projektu.
+
+```bash
+cd services/parking-session-service
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Dla usługi przewidziano osobny kontener `parkivo-session-redis`. Port 6380 hosta jest mapowany na port 6379 kontenera.
+
+```bash
+docker run --name parkivo-session-redis -p 127.0.0.1:6380:6379 -d redis:7-alpine
+```
+
+Zatrzymany kontener uruchamia się przez `docker start parkivo-session-redis`. Gotowość można sprawdzić poleceniem `docker exec parkivo-session-redis redis-cli ping` (oczekiwany wynik to `PONG`). Wartość `TWOJ_NUMER_ALBUMU` w prefiksie kluczy należy zastąpić numerem albumu.
+
+```bash
+export CACHE_PREFIX="lab2:TWOJ_NUMER_ALBUMU:parking-session-service"
+export REDIS_URL="redis://127.0.0.1:6380/0"
+export CACHE_TTL_SECONDS=60
+export DATABASE_URL="sqlite:///./sessions.db"
+python -m uvicorn app.main:app --port 8103
+```
+
+Ponieważ ścieżka do pliku bazy jest względna, przy restarcie należy uruchomić Uvicorna z tego samego katalogu i z tą samą wartością `DATABASE_URL`. Konfiguracja wymaga też `CACHE_PREFIX`. Kody odpowiedzi i nagłówek `X-Cache` są widoczne w [Swagger UI](http://127.0.0.1:8103/docs).
+
+Testy uruchamia się w tym samym katalogu poleceniem `python -m pytest -q`.
+
+### Dowody — zestawienie
+
+W obu uruchomieniach aplikacji użyto tego samego tymczasowego pliku SQLite. Polecenia w tabeli podano dla kontenera z instrukcji uruchomienia. Gotowość po restarcie sprawdzono przez PING z hosta pod adresem używanym przez aplikację.
+
+| Krok | Czynność | Oczekiwany wynik | Wynik rzeczywisty |
+|---|---|---|---|
+| 1 | POST `/sessions` z `{"space_id":41,"vehicle_plate":"KR12345"}`, następnie dwa GET szczegółów w ciągu 60 s | 201, następnie dwa razy 200 z MISS i HIT | POST 201, ID 0. Dwa odczyty: 200 MISS, 200 HIT. |
+| 2 | POST `/sessions/{id}/end`, następnie GET szczegółów | 200, następnie MISS i ustawione ended_at | POST 200. GET 200 MISS, `ended_at=2026-11-12T12:02:26.196759Z`. |
+| 3 | Odczekaj ponad 60 s od zapisu cache z kroku 2 i powtórz GET | MISS i te same dane zakończonej sesji | Po 61 s: 200 MISS. Cała odpowiedź była zgodna z zapisaną zakończoną sesją. |
+| 4 | Zatrzymaj Redis przez `docker stop parkivo-session-redis`. Utwórz nową sesję na zwolnionym miejscu i pobierz ją po nowym ID | POST 201, GET 200 z BYPASS | POST 201, ID 1. GET 200 BYPASS, tablica KR12345, wjazd o 12:03:27.693640 UTC. |
+| 5 | Przy zatrzymanym Redis zakończ Uvicorna przez Ctrl+C. Uruchom ponownie tą samą komendą i pobierz nową sesję | GET 200 z BYPASS, zachowane ID, tablica i czas wjazdu | Po zmianie procesu z PID 55963 na 56015: GET 200 BYPASS. Wszystkie pola zgodne z odpowiedzią POST dla ID 1. |
+| 6 | Uruchom `docker start parkivo-session-redis`, poczekaj na PONG i dwukrotnie odczytaj nową sesję | MISS, potem HIT | Po PONG z hosta: GET 200 MISS, następnie GET 200 HIT dla ID 1. |
+
+Po próbie zakończono sesję 1 przez `POST /sessions/1/end` (200), zatrzymano Uvicorna i usunięto kontener testowy.
+
+### Porównanie i ograniczenia
+
+SQLite zapewnia trwałość między uruchomieniami korzystającymi z tego samego pliku. Osobne pliki oznaczają osobne historie postojów. Redis pozwala pominąć zapytanie SQL przy powtarzanych odczytach jednej sesji. Kosztem jest konieczność usuwania kopii po wyjeździe pojazdu. Domyślny TTL wynosi 60 s i biegnie od zapisu wpisu. Odczyt HIT nie przedłuża tego czasu.
+
+### Dokumentacja i autorzy
+
+#### Fragment 1 — SQLAlchemy, transakcje
+
+Do zapisu postoju zastosowano transakcję `sessions.begin()`. Gdy indeks unikalny odrzuci drugi wjazd na zajęte miejsce, SQLAlchemy wycofuje transakcję. W teście drugi POST zwraca 409, a osobny GET potwierdza, że na liście pozostał tylko pierwszy postój. [Repozytorium](services/parking-session-service/app/repository.py) · [SQLAlchemy — transakcje sesji](https://docs.sqlalchemy.org/en/20/orm/session_transaction.html)
+
+#### Fragment 2 — Redis, zapis z TTL
+
+Czas życia kopii ustawiono argumentem `ex` w `set()`. W teście dwa odczyty sesji powodują jedno zapytanie do repozytorium, a atrapa Redis rejestruje TTL równy 60 s. Po 61 sekundach kolejny odczyt na rzeczywistym serwerze dał MISS (krok 3). [Obsługa cache](services/parking-session-service/app/cache.py) · [Redis SET — opcja EX](https://redis.io/docs/latest/commands/set/)
+
+- Krzysztof Dąbrowski — przeniesienie reguł rozpoczęcia i zakończenia postoju do repozytorium SQLite w Parking Session Service.
+- **Wykorzystanie AI** — przy integracji Redis z pomocą asystenta poprawiono tworzenie klienta i usuwanie wpisu po zakończeniu postoju, dostosowano testy oraz opracowano dokumentację.
