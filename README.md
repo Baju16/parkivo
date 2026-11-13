@@ -14,6 +14,7 @@ Główny cel: pokazać jeden proces biznesowy realizowany przez współpracując
 7. [Stos technologiczny i struktura repozytorium](#struktura)
 8. [Parking Session Service — LAB1](#session-lab1)
 9. [Parking Session Service — LAB2](#session-lab2)
+10. [Parking Session Service i Billing Service — LAB3](#billing-lab3)
 
 ---
 
@@ -1277,3 +1278,127 @@ Czas życia kopii ustawiono argumentem `ex` w `set()`. W teście dwa odczyty ses
 
 - Krzysztof Dąbrowski — przeniesienie reguł rozpoczęcia i zakończenia postoju do repozytorium SQLite w Parking Session Service.
 - **Wykorzystanie AI** — przy integracji Redis z pomocą asystenta poprawiono tworzenie klienta i usuwanie wpisu po zakończeniu postoju, dostosowano testy oraz opracowano dokumentację.
+
+<a id="billing-lab3"></a>
+
+## 10. Parking Session Service i Billing Service — LAB3
+
+W LAB3 dodano wycenę zakończonego postoju. Billing pobiera czasy wjazdu i wyjazdu przez HTTP. Adres instancji Parking Session Service jest ustalany na podstawie nazwy z rejestru Eureka. Trwałość sesji i cache opisano w [sekcji LAB2](#session-lab2).
+
+### Krok 1 — podział odpowiedzialności
+
+| Nazwa w rejestrze | Port lokalny | Własne dane i reguły | Endpoint scenariusza |
+|---|---:|---|---|
+| `PARKING-SESSION-SERVICE` | 8103 | Sesje w SQLite, czasy postoju w UTC, kopia odczytu w Redis | `GET /sessions/{session_id}` |
+| `BILLING-SERVICE` | 8104 | Stawka 5 PLN i reguła zaokrąglania czasu do rozpoczętej godziny | `GET /billing/quote/{session_id}` |
+
+Billing oblicza wycenę na żądanie. Postój trwający dokładnie godzinę kosztuje 5 PLN, a godzinę i sekundę — 10 PLN. Wystawienie rachunku i zapis płatności pozostają poza zakresem tej wersji.
+
+### Krok 2 — rejestracja i odnajdywanie usług
+
+Oba procesy uruchamiają klienta Eureka przez `await discovery.start()` w `lifespan`. Klient rejestruje nazwę i adres instancji, odnawia rejestrację i odświeża lokalną kopię rejestru. Przy zamykaniu aplikacji wywoływane jest `await discovery.stop()`. Parking Session Service w tym samym cyklu życia obsługuje silnik SQLite i klienta Redis.
+
+```text
+Klient → Billing: GET /billing/quote/7
+Billing → Parking Session Service: GET /sessions/7
+Parking Session Service → Billing: dane sesji
+Billing → Klient: wycena w PLN
+```
+
+W drugim kroku Billing używa `do_service("PARKING-SESSION-SERVICE", "/sessions/7", return_type="json", timeout=3)`. Liczba 7 pochodzi z żądania klienta. Eureka udostępnia informacje o instancjach, a żądanie HTTP trafia bezpośrednio do wybranej usługi. Timeout pojedynczego wywołania wynosi 3 sekundy. [Implementacja Billing](services/billing-service/app/main.py)
+
+### Krok 3 — kontrakt API i błędy
+
+Dla zakończonej sesji Billing odczytuje `started_at` i `ended_at` w formacie ISO 8601. Następnie dzieli czas postoju w sekundach przez 3600, zaokrągla wynik w górę i mnoży liczbę godzin przez stawkę. Przykładowa odpowiedź dla sesji 7 trwającej 1 godzinę i 1 sekundę:
+
+```json
+{"session_id": 7, "billable_hours": 2, "amount": 10, "currency": "PLN"}
+```
+
+| Warunek | Kod Billing | Pole `detail` |
+|---|---:|---|
+| Sesja ma `ended_at: null` | 409 | Sesja nadal trwa |
+| Usługa sesji odpowiedziała 404 | 404 | Sesja nie istnieje |
+| Usługa sesji odpowiedziała innym błędem HTTP, np. 500 | 502 | Błąd odpowiedzi Parking Session Service |
+| Brak osiągalnej instancji, błąd połączenia lub timeout | 503 | Parking Session Service niedostępny |
+
+### Uruchomienie i konfiguracja
+
+Przykład dla macOS/Linux. W katalogu pobranego pakietu `lab3-support`, zawierającym `compose.yaml`, uruchamia się rejestr:
+
+```bash
+docker compose up --build -d eureka
+```
+
+Po uruchomieniu dostępny jest [panel Eureka](http://127.0.0.1:8761). Redis dla sesji uruchamia się zgodnie z [LAB2](#session-lab2). Obie aplikacje Python działają w osobnych terminalach. Poniższe bloki rozpoczynają się w głównym katalogu Parkivo i korzystają ze wspólnego środowiska `.venv`.
+
+**Terminal 1 — Parking Session Service.** W prefiksie cache należy wpisać własny numer albumu.
+
+```bash
+cd services/parking-session-service
+../../.venv/bin/python -m pip install -r requirements.txt
+export DATABASE_URL="sqlite:///./sessions.db"
+export CACHE_PREFIX="lab2:TWOJ_NUMER_ALBUMU:parking-session-service"
+export REDIS_URL="redis://127.0.0.1:6380/0"
+export EUREKA_SERVER_URL="http://127.0.0.1:8761"
+export SERVICE_NAME="PARKING-SESSION-SERVICE" SERVICE_PORT=8103
+../../.venv/bin/python -m uvicorn app.main:app --port "$SERVICE_PORT"
+```
+
+**Terminal 2 — Billing Service.**
+
+```bash
+cd services/billing-service
+../../.venv/bin/python -m pip install -r requirements.txt
+export EUREKA_SERVER_URL="http://127.0.0.1:8761"
+export SERVICE_NAME="BILLING-SERVICE" SERVICE_PORT=8104
+../../.venv/bin/python -m uvicorn app.main:app --port "$SERVICE_PORT"
+```
+
+Adres bazowy rejestru podaje się w `EUREKA_SERVER_URL`; klient dołącza kontekst `/eureka`. Przy uruchomieniu obu usług na tym samym komputerze domyślne `INSTANCE_HOST=localhost` i `INSTANCE_IP=127.0.0.1` wskazują osiągalny adres. Wartość `SERVICE_PORT` musi odpowiadać portowi Uvicorna. Po rejestracji w panelu powinny być widoczne obie nazwy ze statusem UP.
+
+### Testy automatyczne
+
+Z głównego katalogu projektu każdy zestaw uruchamia się osobno:
+
+```bash
+(cd services/parking-session-service && ../../.venv/bin/python -m pytest -q tests)
+(cd services/billing-service && ../../.venv/bin/python -m pytest -q tests)
+```
+
+Wynik dla tej pary usług: **15 zaliczonych testów Parking Session Service i 5 zaliczonych testów Billing Service**. Atrapę klienta Eureka przekazano do `create_app()`. W Billing zapisuje ona nazwę wywołanej usługi i ścieżkę, dzięki czemu test wykrywa także błędne ID lub nazwę logiczną.
+
+| Scenariusz Billing | Sprawdzany wynik |
+|---|---|
+| Wycena 1 h i 1 s dla ID 7 | 200, dwie rozpoczęte godziny, 10 PLN, wywołanie `PARKING-SESSION-SERVICE` pod `/sessions/7` |
+| Brak sesji | 404 i komunikat o brakującej sesji |
+| Błąd połączenia | 503 dla wyceny i 200 dla lokalnego `/health` |
+| Błąd HTTP 500 zależności | 502 z komunikatem o błędnej odpowiedzi |
+| Aktywny postój | 409 i komunikat o trwającej sesji |
+
+[Testy Billing](services/billing-service/tests/test_quote.py) · [Testy Session Service](services/parking-session-service/tests)
+
+### Próba z rzeczywistym rejestrem
+
+Aby odtworzyć próbę, należy rozpocząć postój przez `POST /sessions` z ciałem `{"space_id":41,"vehicle_plate":"LAB3"}` na wolnym miejscu. Do wyceny oraz zakończenia postoju należy użyć ID zwróconego przez serwer. Po zatrzymaniu usługi sesji Billing i Eureka pozostają uruchomione. Usługę sesji przywraca się tą samą komendą, w tym samym katalogu, z tym samym plikiem SQLite. Stary wpis może przez pewien czas pozostawać w lokalnym rejestrze klienta. Dostępność sprawdza się przez rzeczywiste żądanie wyceny.
+
+W próbie z lokalnym rejestrem Eureka utworzono sesję o ID `0`. Uzyskano następujące wyniki.
+
+| Etap | Zaobserwowany wynik |
+|---|---|
+| Uruchomienie obu usług | Rejestr zwrócił HTTP 200 i status `UP` dla każdej z dwóch instancji. |
+| Wycena aktywnej sesji | `GET /billing/quote/0` zwrócił 409 i komunikat „Sesja nadal trwa”. |
+| Zakończenie sesji przez `POST /sessions/0/end` i ponowna wycena | Otrzymano 200 oraz `{"session_id":0,"billable_hours":1,"amount":5,"currency":"PLN"}`. |
+| Wycena nieistniejącej sesji | Otrzymano 404 i komunikat „Sesja nie istnieje”. |
+| Zatrzymanie Parking Session Service | Wycena sesji 0 zwróciła 503. Endpoint `GET /health` usługi Billing nadal zwracał 200. |
+| Ponowne uruchomienie Parking Session Service z tą samą bazą | Po około 1 s od uruchomienia procesu uzyskano pierwszą poprawną odpowiedź dla sesji 0 (200, 5 PLN). Billing działał przez cały czas. |
+
+### Dokumentacja techniczna i autorstwo
+
+- **Odnajdywanie usługi.** Adres instancji pobierany jest po nazwie przekazanej do `do_service()`. Test wyceny sprawdza konkretną nazwę i ścieżkę przekazane klientowi. [py-eureka-client](https://github.com/keijack/python-eureka-client)
+- **Rejestracja i odświeżanie wpisów.** Rejestr przechowuje dane instancji, a klient wysyła okresowe odnowienia. Status UP i wynik wywołania HTTP można porównać podczas zatrzymania i ponownego uruchomienia procesu. [Netflix Eureka — REST operations](https://github.com/Netflix/eureka/wiki/Eureka-REST-operations)
+- **Cykl życia.** Kod przed `yield` uruchamia klienta, a blok `finally` go zamyka. W testach `with TestClient(app)` wykonuje ten sam cykl z atrapą. [FastAPI — Lifespan](https://fastapi.tiangolo.com/advanced/events/)
+
+Środowisko testowe: Python 3.14.3, FastAPI 0.161.1, Uvicorn 0.54.0, py-eureka-client 0.13.3, pytest 8.4.2 i HTTPX 0.28.1.
+
+**Wkład:** Krzysztof Dąbrowski — integracja usług sesji i wyceny oraz testy Billing. Pomoc AI obejmowała przykłady integracji, przegląd kodu i błędów, weryfikację oraz opracowanie dokumentacji.
