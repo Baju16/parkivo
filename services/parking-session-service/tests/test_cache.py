@@ -56,11 +56,15 @@ def test_database_read_and_write_during_redis_outage(client, fake_redis):
     assert read.json() == ended.json()
 
 
-def test_startup_creates_configured_redis_client(tmp_path, monkeypatch, fake_redis):
+def test_startup_creates_configured_redis_client(tmp_path, monkeypatch, fake_redis, fake_eureka):
     redis_url = "redis://redis.example:6379/2"
     monkeypatch.setenv("REDIS_URL", redis_url)
     monkeypatch.setenv("CACHE_PREFIX", "lab2:test:parking-session-service")
     factory = Mock(return_value=fake_redis)
     monkeypatch.setattr("app.main.make_redis", factory)
-    with TestClient(create_app(database_url=f"sqlite:///{tmp_path / 'sessions.db'}")):
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'sessions.db'}",
+        eureka_client=fake_eureka,
+    )
+    with TestClient(app):
         factory.assert_called_once_with(redis_url)

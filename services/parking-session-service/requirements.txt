@@ -4,3 +4,4 @@ pytest
 httpx
 SQLAlchemy
 redis
+py-eureka-client==0.13.3

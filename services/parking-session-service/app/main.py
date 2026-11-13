@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Response
 from redis import RedisError
+from py_eureka_client.eureka_client import EurekaClient
 
 
 from app.models import SessionCreate, ParkingSession
@@ -11,7 +12,19 @@ from app.database import Base, make_database
 from app.repository import ParkingSessionsRepository
 from app.cache import make_redis, JsonCache
 
-def create_app(database_url: str | None = None, redis_client=None) -> FastAPI:
+def create_app(database_url: str | None = None, redis_client=None, eureka_client=None) -> FastAPI:
+    discovery = eureka_client
+    if discovery is None:
+        discovery = EurekaClient(
+            eureka_server=os.getenv("EUREKA_SERVER_URL", "http://127.0.0.1:8761"),
+            eureka_context="/eureka",
+            app_name=os.getenv("SERVICE_NAME", "PARKING-SESSION-SERVICE"),
+            instance_host=os.getenv("INSTANCE_HOST", "localhost"),
+            instance_ip=os.getenv("INSTANCE_IP", "127.0.0.1"),
+            instance_port=int(os.getenv("SERVICE_PORT", "8103")),
+            strict_service_error_policy=False
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         url = database_url or os.getenv("DATABASE_URL", "sqlite:///./sessions.db")
@@ -26,7 +39,12 @@ def create_app(database_url: str | None = None, redis_client=None) -> FastAPI:
             Base.metadata.create_all(engine)
             app.state.repository = ParkingSessionsRepository(sessions)
             app.state.cache = JsonCache(client, prefix=os.environ["CACHE_PREFIX"], resource_name="session", ttl=int(os.getenv("CACHE_TTL_SECONDS", "60")))
-            yield
+            app.state.eureka_client = discovery
+            try:
+                await discovery.start()
+                yield
+            finally:
+                await discovery.stop()
         finally:
             try:
                 if redis_client is None and client is not None:

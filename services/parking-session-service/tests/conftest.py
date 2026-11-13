@@ -39,13 +39,21 @@ class MemoryRedis:
         pass
 
 
+class FakeEurekaClient:
+    async def start(self):
+        pass
+
+    async def stop(self):
+        pass
+
+
 @pytest.fixture
 def fake_redis():
     return MemoryRedis()
 
 
 @pytest.fixture
-def app_factory(tmp_path, monkeypatch):
+def app_factory(tmp_path, monkeypatch, fake_eureka):
     monkeypatch.setenv("CACHE_PREFIX", "lab2:test:parking-session-service")
     monkeypatch.setenv("CACHE_TTL_SECONDS", "60")
     database_url = f"sqlite:///{tmp_path / 'sessions.db'}"
@@ -53,7 +61,7 @@ def app_factory(tmp_path, monkeypatch):
     def make_app(redis_client=None):
         if redis_client is None:
             redis_client = MemoryRedis()
-        return create_app(database_url=database_url, redis_client=redis_client)
+        return create_app(database_url=database_url, redis_client=redis_client,  eureka_client=fake_eureka)
 
     return make_app
 
@@ -62,3 +70,8 @@ def app_factory(tmp_path, monkeypatch):
 def client(app_factory, fake_redis):
     with TestClient(app_factory(fake_redis)) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def fake_eureka():
+    return FakeEurekaClient()
