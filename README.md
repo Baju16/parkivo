@@ -15,6 +15,7 @@ Główny cel: pokazać jeden proces biznesowy realizowany przez współpracując
 8. [Parking Session Service — LAB1](#session-lab1)
 9. [Parking Session Service — LAB2](#session-lab2)
 10. [Parking Session Service i Billing Service — LAB3](#billing-lab3)
+11. [Bramka API dla sesji i wyceny — LAB4](#gateway-lab4)
 
 ---
 
@@ -1402,3 +1403,97 @@ W próbie z lokalnym rejestrem Eureka utworzono sesję o ID `0`. Uzyskano nastę
 Środowisko testowe: Python 3.14.3, FastAPI 0.161.1, Uvicorn 0.54.0, py-eureka-client 0.13.3, pytest 8.4.2 i HTTPX 0.28.1.
 
 **Wkład:** Krzysztof Dąbrowski — integracja usług sesji i wyceny oraz testy Billing. Pomoc AI obejmowała przykłady integracji, przegląd kodu i błędów, weryfikację oraz opracowanie dokumentacji.
+
+---
+
+<a id="gateway-lab4"></a>
+
+## 11. Bramka API dla sesji i wyceny — LAB4
+
+Przez port 8080 udostępniono rozpoczęcie i zakończenie postoju, odczyt sesji oraz wycenę. Bramka pobiera adresy instancji z Eureki (`fetch-registry: true`). Jej własna rejestracja oraz automatyczne tworzenie tras są wyłączone. Przy wycenie Billing nadal pobiera sesję po nazwie usługi, zgodnie z LAB3.
+
+```mermaid
+flowchart LR
+    C[Klient] --> G[API Gateway · 8080]
+    G -. pobranie rejestru .-> E[Eureka · 8761]
+    G --> S[Parking Session Service · 8103]
+    G --> B[Billing Service · 8104]
+    B -->|GET /sessions/id| S
+    B -. rejestracja i odkrywanie .-> E
+    S -. rejestracja .-> E
+    S --> D[(SQLite · sessions.db)]
+    S --> R[(Redis · 6380)]
+```
+
+### Trasy i limity czasu
+
+| Metoda i ścieżka klienta | ID trasy | URI | Ścieżka po `StripPrefix=1` | Odpowiedzialność |
+|---|---|---|---|---|
+| `POST /api/sessions` | session | `lb://PARKING-SESSION-SERVICE` | `/sessions` | Utworzenie postoju i sprawdzenie zajętości miejsca |
+| `GET /api/sessions` | session | `lb://PARKING-SESSION-SERVICE` | `/sessions` | Odczyt listy sesji |
+| `GET /api/sessions/{id}` | session | `lb://PARKING-SESSION-SERVICE` | `/sessions/{id}` | Odczyt szczegółów z cache lub SQLite |
+| `POST /api/sessions/{id}/end` | session | `lb://PARKING-SESSION-SERVICE` | `/sessions/{id}/end` | Zapis czasu zakończenia i unieważnienie cache |
+| `GET /api/billing/quote/{id}` | billing | `lb://BILLING-SERVICE` | `/billing/quote/{id}` | Obliczenie kwoty na podstawie czasów pobranych z usługi sesji |
+
+Na portach usług pozostawiono `/health` do diagnostyki poszczególnych procesów oraz `/docs`, `/redoc` i `/openapi.json` do przeglądania ich kontraktów. Na porcie bramki `GET /health` sprawdza stan samej bramki. Filtr tras dodaje `X-Gateway: lab4`, a nagłówek `X-Cache` pochodzi z odczytu szczegółów sesji.
+
+Bramka ma 1000 ms na zestawienie połączenia i 5 s na odpowiedź usługi. Limit wewnętrznego żądania Billing do usługi sesji wynosi 3 s. Pozostawia to czas na odesłanie przez Billing własnego błędu zależności. [Konfiguracja bramki](gateway/src/main/resources/application.yml)
+
+### Uruchomienie i zatrzymanie
+
+1. Uruchomić Redis dla sesji zgodnie z sekcją LAB2 (port 6380), a następnie Eurekę z katalogu `lab3-support` (port 8761). [Konfiguracja Redis](#session-lab2)
+2. Uruchomić oba procesy Uvicorna w osobnych terminalach według poleceń LAB3. Po rejestracji sprawdzić w panelu Eureki status `UP` usług `PARKING-SESSION-SERVICE` i `BILLING-SERVICE`. [Katalogi, zmienne środowiskowe i polecenia uruchomienia](#billing-lab3)
+3. W osobnym terminalu, z głównego katalogu projektu, uruchomić bramkę. Instrukcja laboratoryjna przewiduje JDK 21 i Maven 3.9.x. Przy próbie wykorzystano Maven 3.9.14 i JDK 23 z kompilacją dla Javy 21.
+
+   ```bash
+   cd gateway
+   mvn spring-boot:run
+   ```
+
+4. Sprawdzić `curl -i http://127.0.0.1:8080/health`, a następnie `curl -i http://127.0.0.1:8080/api/sessions`. Pierwsze żądanie sprawdza proces Java, drugie także trasę do usługi. Przy innych portach adres rejestru bramki ustawia się przez `GATEWAY_EUREKA_URL` (domyślnie `http://127.0.0.1:8761/eureka/`), port nasłuchu przez `GATEWAY_PORT`, a adres dla testów przez `GATEWAY_URL`.
+5. Aby zatrzymać środowisko, użyć `Ctrl+C` w terminalach bramki, Billing i usługi sesji. Następnie wykonać `docker compose stop eureka` w katalogu `lab3-support` oraz `docker stop parkivo-session-redis`.
+
+### Testy i dane
+
+Polecenia wykonuje się z głównego katalogu projektu. Pierwsze trzy zestawy korzystają z lokalnych danych testowych i atrap. Czwarty wymaga działających procesów.
+
+```bash
+.venv/bin/python -m pytest tests --ignore=tests/integration -q
+(cd services/parking-session-service && ../../.venv/bin/python -m pytest tests -q)
+(cd services/billing-service && ../../.venv/bin/python -m pytest tests -q)
+
+.venv/bin/python -m pytest tests/integration -q
+```
+
+| Zestaw | Wynik |
+|---|---:|
+| Parking Service | 28/28 |
+| Parking Session Service | 15/15 |
+| Billing Service | 5/5 |
+| Integracja przez bramkę na porcie 8080 | 4/4 |
+
+W testach integracyjnych utworzono sesje na losowo wybranych miejscach. Do kolejnych żądań wykorzystano ID otrzymane z `POST /api/sessions`. Sprawdzono odczyt z nagłówkami `MISS` i `HIT`, wycenę zakończonego postoju (5 PLN), zmianę `ended_at` i odświeżenie cache po zakończeniu oraz błąd 422 wskazujący brak pola `vehicle_plate`. Po teście rozpoczęte postoje są kończone. [Testy integracyjne](tests/integration/test_session_billing_gateway.py)
+
+### Eksperymenty awarii
+
+Próby przeprowadzono 13.11.2026 na osobnej kopii środowiska z tą samą konfiguracją tras. Użyto portów 18080 (bramka), 18761 (Eureka), 18103 (sesje), 18104 (Billing) i 16381 (Redis) oraz tymczasowej bazy SQLite. Utworzono sesję o ID 0 na miejscu 41. Druga próba rozpoczęcia postoju na tym miejscu dała 409, a żądanie bez `vehicle_plate` dało 422. Obie odpowiedzi zawierały `X-Gateway: lab4` i szczegóły błędu z FastAPI. Po zakończeniu sesji uzyskano wycenę 5 PLN. W tabeli podano nagłówki odpowiedzi widoczne u klienta.
+
+| Stan procesów i żądanie | Wynik | Nagłówki i wniosek |
+|---|---|---|
+| 1. Wszystkie procesy działały. `GET /api/sessions/99999` | 404, `{"detail":"Sesja nie istnieje"}` | `X-Gateway: lab4`, brak `X-Cache`. Trasa doprowadziła żądanie do usługi sesji. |
+| 2. Wszystkie procesy działały. `GET /api/health` | 404, odpowiedź WebFlux z polem `path` równym `/api/health` | Oba nagłówki nieobecne. Bramka nie znalazła trasy. |
+| 3. Zatrzymano Billing. Pobrano wycenę i szczegóły sesji 0 przez bramkę oraz bezpośredni `/health` usługi sesji. | Wycena 500 zaraz po zatrzymaniu. Sesja i jej usługa kontrolna zwróciły 200. | Błąd bramki bez obu nagłówków. Odczyt sesji miał `X-Gateway: lab4` i `X-Cache: HIT`. Bramka wciąż próbowała połączyć się z wyłączoną instancją Billing. |
+| 4. Przywrócono Billing i zatrzymano usługę sesji. Powtórzono odczyt sesji, wycenę i bezpośredni `/health` Billing. | Odczyt sesji najpierw 500, potem 503 po usunięciu instancji z lokalnej listy. Wycena 503 z komunikatem „Parking Session Service niedostępny”. Billing `/health` zwrócił 200. | Oba błędy odczytu sesji bez nagłówków. Odpowiedź 503 z Billing miała `X-Gateway: lab4` i nie zawierała `X-Cache`. |
+| 5. Ponownie uruchomiono usługę sesji z tą samą bazą i portem. Przy działającej przez cały czas bramce ponawiano odczyt oraz wycenę. | Po **26,4 s** od uruchomienia procesu potwierdzono 200 na obu trasach. Sesja zachowała czas zakończenia, a wycena wyniosła 5 PLN. | Obie odpowiedzi miały `X-Gateway: lab4`. Odczyt sesji miał dodatkowo `X-Cache: HIT`. Pomiar obejmuje start usługi, odnalezienie instancji i czas do udanej próby HTTP. |
+| 6. Zatrzymano bramkę. Wywołano jej `/health`, a następnie bezpośrednio `/sessions/0` i `/billing/quote/0` na portach usług. | Bramka: odmowa połączenia TCP, bez odpowiedzi HTTP. Oba bezpośrednie odczyty zwróciły 200. | Przy wywołaniu bezpośrednim brak `X-Gateway`. Usługa sesji nadal przekazała `X-Cache: HIT`. |
+
+Wynik tuż po zatrzymaniu procesu zależy od chwili ostatniego odświeżenia listy instancji. Kod 500 zaobserwowano przy próbie połączenia pod stary adres, a 503 z WebFlux po zniknięciu dostępnej instancji. Z kolei odpowiedź 503 z polem `detail` pochodziła z działającego Billing, który odebrał żądanie i wykrył niedostępność swojej zależności.
+
+### Źródła techniczne i wkład autorów
+
+| Źródło i wersja użyta w projekcie | Zastosowanie | Weryfikacja |
+|---|---|---|
+| [Spring Cloud Gateway Server WebFlux — StripPrefix](https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/stripprefix-factory.html), 5.0.3 | Usunięcie jednego segmentu ścieżki przed przekazaniem żądania. | Dla `POST /api/sessions` otrzymano 201, a dla wyceny zakończonej sesji przez drugą trasę 200. |
+| [HTTPX — QuickStart](https://www.python-httpx.org/quickstart/), 0.28.1 | Odczyt kodu, JSON i nagłówków odpowiedzi z rzeczywistej bramki w pytest. | Cztery testy potwierdziły m.in. wycenę, przejście z MISS do HIT i szczegóły błędu walidacji. |
+
+W tej części projektu Krzysztof Dąbrowski odpowiada za integrację sesji i wyceny z bramką. Wkład Dawida Bajka w Parking Service opisano w [sekcji LAB2](#parking-lab2). Przy dopracowaniu konfiguracji tras, przygotowaniu testów oraz opracowaniu dokumentacji wykorzystano AI. Wyniki zweryfikowano przez uruchomienie pytest i wykonanie żądań HTTP przy kontrolowanym zatrzymywaniu oraz przywracaniu procesów.
