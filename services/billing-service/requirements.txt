@@ -1,0 +1,3 @@
+fastapi
+uvicorn
+py-eureka-client==0.13.3
