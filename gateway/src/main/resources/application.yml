@@ -1,0 +1,39 @@
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: ${GATEWAY_PORT:8080}
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: false
+          httpclient:
+            connect-timeout: 1000
+            response-timeout: 5s
+          default-filters:
+            - AddResponseHeader=X-Gateway, lab4
+          routes:
+            - id: session
+              uri: lb://PARKING-SESSION-SERVICE
+              predicates:
+                - Path=/api/sessions,/api/sessions/**
+              filters:
+                - StripPrefix=1
+            - id: billing
+              uri: lb://BILLING-SERVICE
+              predicates:
+                - Path=/api/billing/quote/{id}
+              filters:
+                - StripPrefix=1
+
+eureka:
+  client:
+    register-with-eureka: false
+    fetch-registry: true
+    service-url:
+      defaultZone: ${GATEWAY_EUREKA_URL:http://127.0.0.1:8761/eureka/}
