@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.fakes import FakeEurekaClient
 from app.models import ParkingLotCreate, SpaceCreate
 from app.database import make_database
 from app.repository import ParkingRepository
@@ -17,7 +18,7 @@ def db_url(tmp_path, monkeypatch):
 
 
 def run(db_url, fake_redis, action):
-    with TestClient(create_app(database_url=db_url, redis_client=fake_redis)) as c:
+    with TestClient(create_app(database_url=db_url, redis_client=fake_redis, eureka_client=FakeEurekaClient())) as c:
         return action(c)
 
 

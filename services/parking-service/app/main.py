@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from py_eureka_client.eureka_client import EurekaClient
 from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -14,13 +15,20 @@ from app.models import ParkingLot, ParkingLotCreate, ParkingSpace, SpaceCreate, 
 from app.repository import ParkingRepository
 
 
-def get_repository(request: Request) -> ParkingRepository:
-    return request.app.state.repository
+def create_app(database_url=None, redis_client=None, eureka_client=None) -> FastAPI:
+    # Klient tylko się tworzy; połączenie z Eureką nawiązuje dopiero start() w lifespan.
+    client = eureka_client if eureka_client is not None else EurekaClient(
+        eureka_server=os.getenv("EUREKA_SERVER_URL", "http://127.0.0.1:8761"),
+        eureka_context="/eureka",
+        app_name=os.getenv("SERVICE_NAME", "PARKING-SERVICE"),
+        instance_ip=os.getenv("INSTANCE_IP", "127.0.0.1"),
+        instance_host=os.getenv("INSTANCE_HOST", "localhost"),
+        instance_port=int(os.getenv("SERVICE_PORT", "8101")),
+        strict_service_error_policy=False,
+    )
 
-
-def create_app(database_url=None, redis_client=None) -> FastAPI:
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def storage_lifespan(app: FastAPI):
         engine, sessions = make_database(
             database_url or os.getenv("DATABASE_URL", "sqlite:///./app.db")
         )
@@ -48,10 +56,21 @@ def create_app(database_url=None, redis_client=None) -> FastAPI:
             finally:
                 engine.dispose()
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # baza i cache -> start klienta Eureka -> żądania -> stop klienta -> zamknięcie zasobów
+        async with storage_lifespan(app):
+            app.state.eureka_client = client
+            try:
+                await client.start()
+                yield
+            finally:
+                await client.stop()
+
     app = FastAPI(
         title="Parking Service",
-        description="Student microservice for LAB2",
-        version="0.2.0",
+        description="Student microservice for LAB3",
+        version="0.3.0",
         lifespan=lifespan,
     )
 

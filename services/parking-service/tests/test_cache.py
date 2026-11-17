@@ -1,12 +1,13 @@
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.fakes import FakeEurekaClient
 
 
 def make(tmp_path, monkeypatch, fake_redis):
     monkeypatch.setenv("CACHE_PREFIX", "lab2:test:parking-service")
     db_url = "sqlite:///" + (tmp_path / "c.db").as_posix()
-    return create_app(database_url=db_url, redis_client=fake_redis)
+    return create_app(database_url=db_url, redis_client=fake_redis, eureka_client=FakeEurekaClient())
 
 
 def test_miss_then_hit_skips_repository(tmp_path, monkeypatch, fake_redis):

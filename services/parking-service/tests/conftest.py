@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError
 
 from app.main import create_app
+from tests.fakes import FakeEurekaClient
 
 
 class MemoryRedis:
@@ -49,5 +50,5 @@ def client(tmp_path, monkeypatch, fake_redis):
     # Osobna baza w tmp_path i osobny cache dla każdego testu.
     monkeypatch.setenv("CACHE_PREFIX", "lab2:test:parking-service")
     db_url = "sqlite:///" + (tmp_path / "test.db").as_posix()
-    with TestClient(create_app(database_url=db_url, redis_client=fake_redis)) as test_client:
+    with TestClient(create_app(database_url=db_url, redis_client=fake_redis, eureka_client=FakeEurekaClient())) as test_client:
         yield test_client
