@@ -16,6 +16,7 @@ Główny cel: pokazać jeden proces biznesowy realizowany przez współpracując
 9. [Parking Session Service — LAB2](#session-lab2)
 10. [Parking Session Service i Billing Service — LAB3](#billing-lab3)
 11. [Bramka API dla sesji i wyceny — LAB4](#gateway-lab4)
+12. [Parking Service i Reservation Service — LAB3](#reservation-lab3)
 
 ---
 
@@ -411,27 +412,31 @@ Ta sekcja opisuje wersję LAB1 usługi **Parking Service** (FastAPI). Dokumentac
 ### Uruchomienie
 
 ```bash
+cd services/parking-service
 python -m venv .venv
 .venv\Scripts\activate            # Windows
 pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --port 8101
 ```
 
-Swagger UI: `http://127.0.0.1:8101/docs`. Testy: `python -m pytest`.
+Swagger UI: `http://127.0.0.1:8101/docs`. Testy (z katalogu `services/parking-service`): `python -m pytest`.
 
 ### Struktura kodu
 
 ```
-app/
-  main.py      # create_app(), endpointy, tabela dozwolonych przejść statusów
-  models.py    # modele Pydantic i enumy (SpaceStatus, SpaceType)
-  store.py     # magazyn w pamięci (Store) i dane początkowe (seed)
-tests/
-  conftest.py        # fixture client (świeża aplikacja z create_app())
-  test_health.py     # test /health
-  test_parking.py    # testy domenowe: odczyt, zapis, 404, 422, 409, reguła przejść
-requirements.txt
+services/parking-service/
+  app/
+    main.py      # create_app(), endpointy, tabela dozwolonych przejść statusów
+    models.py    # modele Pydantic i enumy (SpaceStatus, SpaceType)
+    store.py     # magazyn w pamięci (Store) i dane początkowe (seed)
+  tests/
+    conftest.py        # fixture client (świeża aplikacja z create_app())
+    test_health.py     # test /health
+    test_parking.py    # testy domenowe: odczyt, zapis, 404, 422, 409, reguła przejść
+  requirements.txt
 ```
+
+(Od LAB3 kod Parking Service leży w `services/parking-service/`; w LAB1 był w głównym katalogu repozytorium.)
 
 ### Przechowywanie danych i ograniczenia
 
@@ -514,15 +519,15 @@ Wszystkie żądania wykonane w Swagger UI (`http://127.0.0.1:8101/docs`, „Try 
 
 <a id="zrzut-1"></a>**Zrzut 1 — stan początkowy (3 miejsca, wszystkie `FREE`)**
 
-![Stan początkowy](img_1.png)
+![Stan początkowy](docs/screenshots/img_1.png)
 
 <a id="zrzut-2"></a>**Zrzut 2 — po zmianie (`A-01` = `OCCUPIED`, dodane `B-01`)**
 
-![Po zmianie danych](img_2.png)
+![Po zmianie danych](docs/screenshots/img_2.png)
 
 <a id="zrzut-3"></a>**Zrzut 3 — po restarcie (stan jak na początku)**
 
-![Po restarcie](img_3.png)
+![Po restarcie](docs/screenshots/img_3.png)
 
 **Wyjaśnienie:**
 
@@ -637,19 +642,19 @@ redis>=5,<7
 **Struktura kodu po LAB2:**
 
 ```
-app/
-  main.py        # create_app(database_url=None, redis_client=None), endpointy LAB1
-  models.py      # modele Pydantic (kontrakt API) — bez zmian
-  db_models.py   # modele ORM: tabele parking_lots, parking_spaces
-  database.py    # silnik, fabryka sesji, PRAGMA foreign_keys=ON
-  repository.py  # operacje na bazie, jedna sesja na operację
-  cache.py       # JsonCache (Redis) — używany od kroku 5
-tests/
-  conftest.py            # fixture client: baza w tmp_path + MemoryRedis
-  test_health.py, test_parking.py        # testy LAB1 (na bazie)
-  test_persistence.py, test_cache.py, test_cache_failure.py   # testy LAB2
-requirements.txt
-README.md
+services/parking-service/
+  app/
+    main.py        # create_app(database_url=None, redis_client=None), endpointy LAB1
+    models.py      # modele Pydantic (kontrakt API) — bez zmian
+    db_models.py   # modele ORM: tabele parking_lots, parking_spaces
+    database.py    # silnik, fabryka sesji, PRAGMA foreign_keys=ON
+    repository.py  # operacje na bazie, jedna sesja na operację
+    cache.py       # JsonCache (Redis) — używany od kroku 5
+  tests/
+    conftest.py            # fixture client: baza w tmp_path + MemoryRedis
+    test_health.py, test_parking.py        # testy LAB1 (na bazie)
+    test_persistence.py, test_cache.py, test_cache_failure.py   # testy LAB2
+  requirements.txt
 ```
 
 **Konfiguracja:**
@@ -668,6 +673,7 @@ Plik bazy (`*.db` i pliki pomocnicze SQLite) jest w `.gitignore` i nie trafia do
 **Uruchomienie z konfiguracją:**
 
 ```bash
+cd services/parking-service
 export DATABASE_URL="sqlite:///./app.db"
 export REDIS_URL="redis://localhost:6379/0"
 export CACHE_PREFIX="lab2:<numer_albumu>:parking-service"
@@ -792,6 +798,7 @@ Reset: `docker exec lab2-redis redis-cli DEL <klucz>` i usunięcie `app.db`. Nie
 Wymagania: Python 3.12+, Docker (Redis). Poniżej polecenia dla macOS/Linux; na Windows zamiast `source` i `export` użyj `.venv\Scripts\activate` i `$env:ZMIENNA = '...'`.
 
 ```bash
+cd services/parking-service
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -806,7 +813,7 @@ export CACHE_TTL_SECONDS=60
 python -m uvicorn app.main:app --port 8101
 ```
 
-Testy: `python -m pytest -q` (nie wymagają Dockera ani zmiennych — fixture ustawia własny prefiks i bazę). Baza to plik `app.db` w katalogu uruchomienia; schemat tworzy `Base.metadata.create_all` przy starcie aplikacji, a dane początkowe trafiają tylko do pustej bazy. W repozytorium nie ma sekretów; pliki `*.db` są w `.gitignore`.
+Testy (z katalogu `services/parking-service`): `python -m pytest -q` (nie wymagają Dockera ani zmiennych — fixture ustawia własny prefiks i bazę). Baza to plik `app.db` w katalogu uruchomienia (`services/parking-service/app.db`); schemat tworzy `Base.metadata.create_all` przy starcie aplikacji, a dane początkowe trafiają tylko do pustej bazy. W repozytorium nie ma sekretów; pliki `*.db` są w `.gitignore`.
 
 ### Dowody — zestawienie
 
@@ -917,13 +924,13 @@ except RedisError:
 | Testy | pytest + httpx |
 | Dokumentacja | Swagger UI / OpenAPI (`/docs`) |
 
-Obecnie Parking Service znajduje się w głównym `app/`, a Parking Session Service w `services/parking-session-service/`. Wspólna dokumentacja znajduje się w tym pliku. Poniżej przedstawiono planowaną strukturę docelową:
+Parking Service znajduje się w `services/parking-service/`, Parking Session Service w `services/parking-session-service/`, Billing Service w `services/billing-service/`, a miejsce na Reservation Service przygotowano w `services/reservation-service/`. Wspólna dokumentacja znajduje się w tym pliku. Struktura repozytorium (pełna docelowo):
 
 ```
 parkivo/
   services/
-    parking-service/
-    reservation-service/
+    parking-service/          # port 8101
+    reservation-service/      # port 8102 (w przygotowaniu)
     parking-session-service/
     billing-service/
   docker-compose.yml
@@ -1458,7 +1465,7 @@ Bramka ma 1000 ms na zestawienie połączenia i 5 s na odpowiedź usługi. Limit
 Polecenia wykonuje się z głównego katalogu projektu. Pierwsze trzy zestawy korzystają z lokalnych danych testowych i atrap. Czwarty wymaga działających procesów.
 
 ```bash
-.venv/bin/python -m pytest tests --ignore=tests/integration -q
+(cd services/parking-service && ../../.venv/bin/python -m pytest tests -q)
 (cd services/parking-session-service && ../../.venv/bin/python -m pytest tests -q)
 (cd services/billing-service && ../../.venv/bin/python -m pytest tests -q)
 
@@ -1497,3 +1504,214 @@ Wynik tuż po zatrzymaniu procesu zależy od chwili ostatniego odświeżenia lis
 | [HTTPX — QuickStart](https://www.python-httpx.org/quickstart/), 0.28.1 | Odczyt kodu, JSON i nagłówków odpowiedzi z rzeczywistej bramki w pytest. | Cztery testy potwierdziły m.in. wycenę, przejście z MISS do HIT i szczegóły błędu walidacji. |
 
 Krzysztof Dąbrowski odpowiada za integrację sesji i wyceny z bramką. Przy dopracowaniu konfiguracji tras, przygotowaniu testów oraz opracowaniu dokumentacji wykorzystano AI. Wyniki zweryfikowano przez uruchomienie pytest i wykonanie żądań HTTP przy kontrolowanym zatrzymywaniu oraz przywracaniu procesów.
+
+<a id="reservation-lab3"></a>
+
+## 12. Parking Service i Reservation Service — LAB3
+
+W LAB3 pierwsza usługa (Parking Service z LAB1 i LAB2) jest uzupełniona o drugą: Reservation Service. Reservation Service pyta Parking Service o miejsce, odnajdując je przez nazwę logiczną w rejestrze Eureka. Kod Parking Service znajduje się w `services/parking-service/`, a Reservation Service w `services/reservation-service/`.
+
+### Krok 2 — granica drugiej usługi
+
+| Usługa | Odpowiedzialność | Właściciel danych | Endpoint potrzebny do scenariusza | Nazwa w Eurece | Port |
+|---|---|---|---|---|---:|
+| Pierwsza — Parking Service | Co fizycznie istnieje na parkingu i w jakim stanie jest każde miejsce | `parking_lots`, `parking_spaces` (SQLite), kopia odczytu miejsca w Redis | `GET /spaces/{space_id}` | `PARKING-SERVICE` | 8101 (dotychczasowy) |
+| Druga — Reservation Service | Kto zarezerwował które miejsce; sprawdzenie, czy miejsce nadaje się do rezerwacji | `reservations` (id, space_id, user_id, status) — własny magazyn tej usługi | `POST /reservations`, `GET /reservations/{id}`, `GET /reservations` | `RESERVATION-SERVICE` | 8102 |
+
+Granica danych: Reservation Service **nie zna tabel** Parking Service i nie łączy się z jego bazą. Informacje o miejscu (czy istnieje i jaki ma status) pobiera wyłącznie przez API. Parking Service nie zapisuje rezerwacji; status `RESERVED` jest stanem miejsca, a rezerwacja (kto) pozostaje w Reservation Service. Porty 8103, 8104 i 8080 zajmują pozostałe usługi i bramka.
+
+**Uzasadnienie scenariusza**
+
+- **Kto potrzebuje tych danych?** Reservation Service. Przed zapisem rezerwacji musi wiedzieć, czy wskazane miejsce istnieje i jest wolne.
+- **Dlaczego należą do Parking Service?** To on prowadzi rejestr miejsc i pilnuje ich statusu oraz przejść między statusami. Skopiowanie tych tabel do drugiej usługi rozdzieliłoby jedną odpowiedzialność i groziło rozjazdem danych.
+- **Co dostaje odbiorca, gdy zależność nie odpowiada?** Kontrolowane `503` z komunikatem, bez zapisu rezerwacji (nie powstaje rezerwacja miejsca, o którego stanie nic nie wiadomo).
+
+**Kontrakt wywołania HTTP**
+
+- **Wywołujący:** Reservation Service.
+- **Nazwa logiczna odnajdywanej usługi:** `PARKING-SERVICE` (adres instancji pochodzi z rejestru Eureka, nie z kodu).
+- **Metoda i ścieżka:** `GET /spaces/{space_id}`, gdzie `space_id` pochodzi z żądania klienta.
+- **Dane wejściowe od klienta Reservation Service:** `POST /reservations` z `{"space_id": 1, "user_id": "jan"}` (`space_id` liczba całkowita, `user_id` tekst 1–50 znaków).
+- **Odpowiedź Parking Service (używane pola):** `{"id": 1, "parking_lot_id": 1, "number": "A-01", "type": "STANDARD", "status": "FREE"}`.
+- **Timeout wywołania:** 2 s, bez ponowień (ponowienia i circuit breaker są poza zakresem tego etapu; wcześniejszy plan z sekcji 2 zakładał dwa ponowienia, co jest odłożone).
+
+Ten etap obejmuje tylko **odczyt** informacji o miejscu. Ustawienie statusu `RESERVED` przez `PATCH /spaces/{id}/status` jest planowane na następny etap, bo sprawdzenie i późniejszy zapis w dwóch usługach nie są jedną transakcją i wymagają osobnego opisu spójności.
+
+| Wynik wywołania Parking Service | Odpowiedź Reservation Service | Znaczenie |
+|---|---|---|
+| `200`, `status = FREE` | `201` z rezerwacją | miejsce wolne, rezerwacja zapisana |
+| `200`, `status` inny niż `FREE` | `409` „Space not available”, brak zapisu | miejsce zajęte, zarezerwowane lub wyłączone |
+| `404` | `404` „Space not found” | brak miejsca |
+| inny błąd HTTP, np. `500` | `502` | zależność odpowiedziała błędem |
+| brak instancji, błąd połączenia lub timeout | `503` | nie udało się uzyskać odpowiedzi zależności; `/health` Reservation Service nadal zwraca `200` |
+
+Odpowiedź `409` pochodzi z reguły Reservation Service („rezerwować można tylko wolne miejsce”) i nie jest przekazaniem `409` z Parking Service. Brak miejsca (`404`) jest innym wynikiem niż brak połączenia z usługą (`503`).
+
+```text
+Klient → Reservation Service: POST /reservations {"space_id": 1, "user_id": "jan"}
+Reservation Service → Eureka (lokalna kopia rejestru): adres instancji PARKING-SERVICE
+Reservation Service → Parking Service: GET /spaces/1
+Parking Service → Reservation Service: dane miejsca (status FREE)
+Reservation Service → Klient: 201 z rezerwacją
+```
+
+### Rejestracja w Eurece
+
+Po uruchomieniu Eureka Server (Docker, port 8761) oraz obu usług panel Eureki pokazuje `PARKING-SERVICE` (`127.0.0.1:8101`) i `RESERVATION-SERVICE` (`127.0.0.1:8102`) ze stanem `UP (1)`.
+
+![Panel Eureki: obie usługi UP](docs/screenshots/img_4.png)
+
+### Uruchomienie i konfiguracja
+
+Przykład dla macOS/Linux. Eureka Server pochodzi z pakietu `lab3-support` i działa w Dockerze; obie usługi Python działają lokalnie jako osobne procesy, ze wspólnym środowiskiem `.venv` z głównego katalogu. Wersje: Python 3.12, `py-eureka-client==0.13.3`.
+
+```bash
+# 1. Rejestr (katalog lab3-support) oraz Redis dla Parking Service
+docker compose up --build -d eureka          # panel: http://localhost:8761
+docker start lab2-redis
+
+# 2. Parking Service (terminal 1)
+cd services/parking-service
+export EUREKA_SERVER_URL=http://127.0.0.1:8761 SERVICE_NAME=PARKING-SERVICE SERVICE_PORT=8101
+export INSTANCE_IP=127.0.0.1 INSTANCE_HOST=localhost
+export DATABASE_URL=sqlite:///./app.db REDIS_URL=redis://localhost:6379/0
+export CACHE_PREFIX="lab2:<numer_albumu>:parking-service" CACHE_TTL_SECONDS=60
+../../.venv/bin/python -m uvicorn app.main:app --port 8101
+
+# 3. Reservation Service (terminal 2)
+cd services/reservation-service
+export EUREKA_SERVER_URL=http://127.0.0.1:8761 SERVICE_NAME=RESERVATION-SERVICE SERVICE_PORT=8102
+export INSTANCE_IP=127.0.0.1 INSTANCE_HOST=localhost
+../../.venv/bin/python -m uvicorn app.main:app --port 8102
+```
+
+| Zmienna | Znaczenie |
+|---|---|
+| `EUREKA_SERVER_URL` | adres bazowy rejestru, bez końcowego `/eureka` (ścieżkę API ustawia `eureka_context="/eureka"`) |
+| `SERVICE_NAME` | nazwa logiczna zgłaszana do Eureki |
+| `SERVICE_PORT` | port zgłaszany do rejestru; musi być równy `--port` Uvicorna |
+| `INSTANCE_IP`, `INSTANCE_HOST` | adres i nazwa hosta instancji osiągalne dla drugiej usługi (lokalnie `127.0.0.1` i `localhost`) |
+
+Zmiana zmiennych wymaga ponownego uruchomienia procesu; usługi uruchamia się bez `--reload`. Cykl życia: w Parking Service baza i cache (`storage_lifespan`) → start klienta Eureka → obsługa żądań → stop klienta → zamknięcie zasobów; w Reservation Service start i stop klienta Eureka. Klient jest tworzony w `create_app()`, więc testy przekazują atrapę.
+
+Testy (bez Eureki, Dockera i sieci), osobno dla każdej usługi:
+
+```bash
+(cd services/parking-service && ../../.venv/bin/python -m pytest -q)
+(cd services/reservation-service && ../../.venv/bin/python -m pytest -q)
+```
+
+Wynik: **29 testów Parking Service** (dotychczasowe z LAB1 i LAB2 oraz test startu i zatrzymania klienta Eureka) i **10 testów Reservation Service**. Atrapa `FakeEurekaClient` (`tests/fakes.py`) zapisuje nazwę usługi i ścieżkę przekazane do `do_service`, więc test wykrywa błędną nazwę logiczną lub ID. Atrapa nie dowodzi poprawności adresu w prawdziwym rejestrze — to sprawdzono ręcznie.
+
+### Wyniki weryfikacji
+
+Próbę wykonano na lokalnych procesach: Eureka w Dockerze, obie usługi jako Uvicorn, żądania przez `curl`. Parking Service użył osobnego, świeżego pliku bazy SQLite i Redis z lokalnym prefiksem testowym, który po próbie usunięto. Stan początkowy: seed (miejsca `A-01`, `A-02`, `A-03` wolne), pusta lista rezerwacji.
+
+| Scenariusz | Żądanie | Oczekiwany wynik | Wynik rzeczywisty | Przywrócenie stanu |
+|---|---|---|---|---|
+| Rejestracja | start Eureki i obu usług | obie `UP` | zgodny — [zrzut](#rejestracja-w-eurece) | — |
+| Poprawny odczyt | `POST /reservations` `{"space_id":1,"user_id":"jan"}` | `201` z rezerwacją | `201`, `{"space_id":1,"user_id":"jan","id":1,"status":"ACTIVE"}` | restart Reservation Service czyści rezerwacje |
+| Brak zasobu | `POST` z `"space_id":999` | `404`, procesy działają | `404`, `{"detail":"Space not found"}` | — |
+| Miejsce niedostępne | `PATCH /spaces/2/status` na `OCCUPIED` (`200`), potem `POST` dla `space_id:2` | `409`, brak nowej rezerwacji | `409`, `{"detail":"Space not available"}`; `GET /reservations` bez nowego wpisu | `PATCH` na `FREE` |
+| Niedostępna zależność | zatrzymanie Parking Service (SIGINT), ponowione `POST` | `503`, `/health` Reservation `200` | `503`, `{"detail":"Parking Service is unavailable"}` po 1, 2 i 3 s od zatrzymania; `/health` `200`; lista rezerwacji bez nowych wpisów | ponowne uruchomienie Parking Service |
+| Powrót usługi | start Parking Service, powtarzane `POST` | ponownie `201` | w pomiarze kontrolnym `503` w 0 s i 3 s, `201` po 7 s od startu | — |
+
+**Obserwacje i ograniczenia**
+
+- **Wyrejestrowanie.** Zatrzymanie sygnałem przerwania (jak Ctrl+C) pozwala klientowi się wyrejestrować. Wpis `PARKING-SERVICE` był w panelu jeszcze około 4 s po zatrzymaniu, a po około 13 s już zniknął. Nagła awaria procesu nie daje takiej szansy i wpis może pozostać do wygaśnięcia dzierżawy; Eureka ma też mechanizm self-preservation, który może wstrzymać usuwanie wpisów — nie wyłączano go.
+- **Błąd mimo wpisu `UP`.** Zaraz po zatrzymaniu usługi Reservation Service dostał `503`, mimo że wpis w rejestrze jeszcze istniał: adres z lokalnej kopii rejestru nie odpowiadał (odmowa połączenia). `UP` w Eurece nie jest więc dowodem, że instancja odpowie.
+- **Powrót usługi.** Czas do pierwszego `201` zależy od rejestracji nowej instancji i odświeżenia lokalnej kopii rejestru w kliencie. W pierwszym podejściu `503` utrzymywało się ponad 20 s (pomiar przerwano, a kolejna próba wróciła z `201` dopiero po dłuższym czasie, więc dokładny czas nie jest wiarygodny), w pomiarze kontrolnym `201` pojawiło się po 7 s. Należy zakładać opóźnienie rzędu kilkudziesięciu sekund i nie traktować go jako stałego.
+- **Zatrzymanie samej Eureki** nie jest równoważne zatrzymaniu usługi: wcześniej poznane adresy mogą działać dalej, ale nowy klient bez kopii rejestru nie odnajdzie niczego.
+- **Brak atomowości.** Reservation Service tylko odczytuje stan miejsca; między sprawdzeniem a zapisem rezerwacji inny klient może zająć miejsce. Zmiana statusu miejsca na `RESERVED` przez `PATCH` jest następnym etapem i będzie wymagała osobnego opisu spójności.
+- **Dane rezerwacji** są w pamięci procesu — znikają po restarcie Reservation Service.
+- **Poza zakresem etapu:** ponowienia, circuit breaker, API Gateway, kolejki i klaster Eureki.
+
+### Krok 7 — testy automatyczne
+
+Testy nie wymagają Eureka Server, Dockera ani sieci: do `create_app(eureka_client=...)` przekazywana jest atrapa `FakeEurekaClient` z asynchronicznymi metodami `start()`, `stop()` i `do_service()`. Atrapa zapisuje wywołania `(nazwa usługi, ścieżka, return_type, timeout)` i może zgłosić wskazany błąd. Testy Reservation Service korzystają z `TestClient`, który uruchamia też `lifespan` aplikacji.
+
+| Wymaganie z instrukcji | Test (`services/reservation-service/tests/test_reservations.py`) |
+|---|---|
+| Poprawny odczyt, kod i pola odpowiedzi, nazwa logiczna oraz ścieżka | `test_success_discovers_parking_service_by_name` — `201`, JSON rezerwacji oraz wywołanie `("PARKING-SERVICE", "/spaces/1", "json", 2)` |
+| Identyfikator z żądania trafia do ścieżki | `test_path_uses_space_id_from_request` |
+| Brak zasobu (`404`), brak zapisu | `test_missing_space_is_404_and_nothing_saved` |
+| Niedostępność zależności (`503`), `/health` nadal `200` | `test_unavailable_dependency_is_503_and_health_stays_ok`, `test_timeout_is_503` |
+| Inny błąd HTTP zależności (`502`) | `test_other_http_error_is_502` |
+| Reguła domenowa (`409`), brak zapisu | `test_not_free_space_is_409_and_not_saved` |
+| Walidacja (`422`) bez wołania zależności | `test_invalid_body_is_422_without_calling_parking_service` |
+| Brak rezerwacji (`404`) | `test_unknown_reservation_is_404` |
+| Cykl życia klienta (start przy otwarciu, stop przy zamknięciu aplikacji) | `test_eureka_client_started_and_stopped_with_app` |
+
+W Parking Service wszystkie dotychczasowe testy (LAB1 i LAB2: walidacja, konflikty, reguła przejść statusów, trwałość, cache) dostają atrapę klienta, więc nie łączą się z rejestrem. Dodano `test_eureka_client_is_started_and_stopped_with_the_app` (`tests/test_health.py`). Wyniki: **29 testów Parking Service** i **10 testów Reservation Service** przechodzą (`python -m pytest -q` w katalogu każdej usługi). Rzeczywista rejestracja i odnajdywanie były sprawdzone ręcznie (tabela w „Wyniki weryfikacji”); atrapa potwierdza sposób użycia klienta, ale nie poprawność adresu w prawdziwym rejestrze.
+
+### Dokumentacja, wersje i autorzy
+
+**Wersje narzędzi:** Python 3.12.7, FastAPI 0.162.0, Starlette 0.47.3, Uvicorn 0.54.0, pytest 8.4.2, httpx 0.28.1, `py-eureka-client` 0.13.3, Eureka Server z pakietu `lab3-support` (Spring Boot 4.1.1, Spring Cloud 2025.1.3), Docker.
+
+#### Źródło 1 — Netflix Eureka, „Eureka REST operations”
+
+Dokumentacja: <https://github.com/netflix/eureka/wiki/Eureka-REST-operations> (sprawdzona 2026-11-17).
+
+**Problem:** zrozumieć, co klient robi z rejestrem (rejestracja, heartbeat, pobranie rejestru, wyrejestrowanie) i dlaczego wpis może przez chwilę zostać po zatrzymaniu usługi.
+**Z dokumentacji:** rejestracja to `POST /eureka/v2/apps/{appID}`, heartbeat to `PUT /eureka/v2/apps/{appID}/{instanceID}`, pobranie instancji to `GET /eureka/v2/apps`, a wyrejestrowanie to `DELETE /eureka/v2/apps/{appID}/{instanceID}`. Dzierżawa wynosi domyślnie 90 s; brak heartbeatu w tym czasie powoduje usunięcie instancji. Przygotowany serwer Spring Cloud udostępnia te endpointy pod `/eureka/*`, dlatego klient ma `eureka_context="/eureka"`, a `EUREKA_SERVER_URL` jest adresem bazowym.
+
+**Zastosowanie** (`services/reservation-service/app/main.py`):
+
+```python
+EurekaClient(
+    eureka_server=os.getenv("EUREKA_SERVER_URL", "http://127.0.0.1:8761"),
+    eureka_context="/eureka",
+    app_name=os.getenv("SERVICE_NAME", "RESERVATION-SERVICE"),
+    ...
+)
+```
+
+**Sprawdzenie:** zapytanie `GET http://localhost:8761/eureka/apps` (nagłówek `Accept: application/json`) listuje `PARKING-SERVICE` i `RESERVATION-SERVICE` ze stanem `UP` — [zrzut panelu](#rejestracja-w-eurece). Po zatrzymaniu Parking Service wpis zniknął po około 13 s (sekcja „Wyniki weryfikacji”).
+
+#### Źródło 2 — biblioteka `py-eureka-client` 0.13.3
+
+Dokumentacja: dokumentacja projektu na GitHub <https://github.com/keijack/python-eureka-client> oraz opis pakietu w zainstalowanej wersji 0.13.3 (docstring klasy `EurekaClient` odczytano w zainstalowanym pakiecie; strona PyPI nie wczytała się podczas sprawdzania). Biblioteka nie jest oficjalnym klientem Netflix.
+
+**Problem:** odnaleźć usługę po nazwie logicznej i wykonać do niej żądanie HTTP bez wpisywania adresu w kodzie oraz zachować kody błędów (`404` zależności nie może zamienić się w `503`).
+**Z dokumentacji/kodu biblioteki:** `await client.start()` i `await client.stop()` uruchamiają i zatrzymują klienta, `await client.do_service(app_name, service, return_type=..., timeout=...)` wybiera instancję z lokalnej kopii rejestru i wywołuje ją. Parametr `renewal_interval_in_secs` (domyślnie 30 s) określa, jak często klient wysyła heartbeat i pobiera rejestr. Przy `strict_service_error_policy=True` błędy HTTP są traktowane jak błąd instancji, więc projekt ustawia `False`, aby `HTTPError` trafił do kodu endpointu.
+
+**Zastosowanie** (`services/reservation-service/app/main.py`):
+
+```python
+space = await request.app.state.eureka_client.do_service(
+    "PARKING-SERVICE", f"/spaces/{data.space_id}", return_type="json", timeout=2)
+...
+except HTTPError as exc:      # 404 -> 404, inny błąd HTTP -> 502
+except (URLError, TimeoutError) as exc:  # 503
+```
+
+**Sprawdzenie:** testy `test_success_discovers_parking_service_by_name` (nazwa logiczna i ścieżka), `test_missing_space_is_404_and_nothing_saved`, `test_other_http_error_is_502`, `test_unavailable_dependency_is_503_and_health_stays_ok`; ręcznie `POST /reservations` zwrócił `201`, a po zatrzymaniu Parking Service `503` (sekcja „Wyniki weryfikacji”). Opóźnienie powrotu usługi (kilkanaście sekund) zgadza się z odświeżaniem kopii rejestru co `renewal_interval_in_secs`.
+
+#### Źródło 3 — FastAPI, „Lifespan Events”
+
+Dokumentacja: <https://fastapi.tiangolo.com/advanced/events/> (sprawdzona 2026-11-17).
+
+**Problem:** uruchomić klienta Eureka raz na instancję aplikacji i zatrzymać go przy zamknięciu, a w Parking Service zachować kolejność z LAB2 (baza i cache przed rejestracją).
+**Z dokumentacji:** `lifespan` to asynchroniczny menedżer kontekstu; kod przed `yield` wykonuje się przy starcie, a po `yield` po zakończeniu aplikacji.
+
+**Zastosowanie** (`services/parking-service/app/main.py`):
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with storage_lifespan(app):      # baza i cache z LAB2
+        app.state.eureka_client = client
+        try:
+            await client.start()
+            yield
+        finally:
+            await client.stop()
+```
+
+**Sprawdzenie:** `test_eureka_client_is_started_and_stopped_with_the_app` (`starts == stops == 1`) oraz próba ręczna: po Ctrl+C usługa wyrejestrowała się z Eureki.
+
+#### Wkład autorów i użycie AI
+
+- **Autor tej części (Parking Service, Reservation Service):** Dawid Bajek — wybór scenariusza i granic usług, uruchomienie środowiska, zrzut panelu Eureki.
+- **AI:** Claude Code (model Claude Sonnet 5.5) pomagał przy implementacji klienta Eureka w Parking Service, napisaniu Reservation Service, testów z atrapą oraz wersji roboczej dokumentacji
+- **Następny etap:** zmiana statusu miejsca na `RESERVED` przez `PATCH /spaces/{id}/status` po utworzeniu rezerwacji, z opisem spójności i obsługą błędów drugiego wywołania.

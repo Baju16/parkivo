@@ -1,18 +1,35 @@
+# Python
 .venv/
+venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
-.idea
+.mypy_cache/
+.ruff_cache/
+
+# Lokalne bazy SQLite
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
+# Sekrety i lokalna konfiguracja
+.env
+.env.*
+!.env.example
 
+# Logi
+*.log
+
+# Maven / Java (bramka, Eureka)
+target/
+
+# IDE i system
+.idea/
+.vscode/
 .DS_Store
 
+# Robocze instrukcje do labów
 LAB2-INSTRUKCJA.md
+LAB3-INSTRUKCJA.md
