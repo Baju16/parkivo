@@ -6,8 +6,14 @@ from fastapi import FastAPI, HTTPException
 from py_eureka_client.eureka_client import EurekaClient
 from datetime import datetime
 from urllib.error import HTTPError, URLError
+from asyncio import to_thread
+from datetime import datetime, timezone
 
-def create_app(eureka_client=None) -> FastAPI:
+from app.messaging import RabbitEventBroker, BrokerUnavailableError
+from app.database import Base, make_database
+from app.repository import PaymentsRepository
+
+def create_app(eureka_client=None, event_broker=None, database_url: str | None = None) -> FastAPI:
     discovery = eureka_client
     if discovery is None:
         discovery = EurekaClient(
@@ -22,12 +28,32 @@ def create_app(eureka_client=None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.eureka_client = discovery
+        url = database_url or os.getenv(
+            "DATABASE_URL", "sqlite:///./billing.db"
+        )
+        engine, session_factory = make_database(url)
+
         try:
-            await discovery.start()
-            yield
+            broker = event_broker
+            if broker is None:
+                broker = RabbitEventBroker()
+
+            try:
+                Base.metadata.create_all(engine)
+
+                app.state.repository = PaymentsRepository(session_factory)
+                app.state.event_broker = broker
+                app.state.eureka_client = discovery
+
+                try:
+                    await discovery.start()
+                    yield
+                finally:
+                    await discovery.stop()
+            finally:
+                broker.close()
         finally:
-            await discovery.stop()
+            engine.dispose()
 
     app = FastAPI(title="Billing Service", lifespan=lifespan)
 
@@ -70,7 +96,66 @@ def create_app(eureka_client=None) -> FastAPI:
             "amount": billable_hours * hourly_rate,
             "currency": "PLN",
         }
-    
+
+    @app.post("/billing/payments/{session_id}", status_code=201)
+    async def pay_for_session(session_id: int):
+        repository = app.state.repository
+
+        payment = await to_thread(
+            repository.get_by_session_id, session_id
+        )
+
+        if payment is None:
+            quote = await get_quote(session_id)
+
+            payment = await to_thread(
+                repository.add,
+                session_id,
+                quote["amount"],
+                quote["currency"],
+            )
+
+        if payment.published_at is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Sesja została już opłacona",
+            )
+
+        # SQLite odczytuje DateTime bez informacji o strefie.
+        # paid_at jest zapisywane w UTC.
+        occurred_at = payment.paid_at.replace(tzinfo=timezone.utc)
+
+        event = {
+            "event_id": payment.event_id,
+            "event_type": "PaymentCompleted",
+            "payment_id": payment.id,
+            "session_id": payment.session_id,
+            "amount": payment.amount,
+            "currency": payment.currency,
+            "occurred_at": occurred_at.isoformat(),
+        }
+
+        try:
+            await to_thread(
+                app.state.event_broker.publish,
+                "payment.completed",
+                event,
+            )
+        except BrokerUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Publikacja płatności nie powiodła się. Ponów żądanie.",
+            ) from exc
+
+        await to_thread(repository.mark_published, payment.id)
+
+        return {
+            "payment_id": payment.id,
+            "session_id": payment.session_id,
+            "amount": payment.amount,
+            "currency": payment.currency,
+            "event_id": payment.event_id,
+        }    
 
     return app
 
