@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update, func
 from sqlalchemy.exc import IntegrityError
 
-from app.db_models import ParkingSessionRow
+from app.db_models import ParkingSessionRow, ProcessedEventRow
 from app.models import SessionCreate
 
 def session_payload(row: ParkingSessionRow) -> dict:
@@ -16,7 +16,8 @@ def session_payload(row: ParkingSessionRow) -> dict:
         "space_id": row.space_id,
         "vehicle_plate": row.vehicle_plate,
         "started_at": row.started_at.replace(tzinfo=timezone.utc),
-        "ended_at": ended_at
+        "ended_at": ended_at,
+        "is_paid": row.is_paid
     }
 
 class ParkingSessionsRepository:
@@ -73,4 +74,30 @@ class ParkingSessionsRepository:
                 raise ValueError("Sesja jest juz zakończona")
 
             return session_payload(row)
+        
+    def apply_payment_event(self, event_id: str, session_id: int) -> bool:
+        try:
+            with self.sessions.begin() as db:
+                if db.get(ProcessedEventRow, event_id) is not None:
+                    return False
+
+                db.add(ProcessedEventRow(event_id=event_id))
+                db.flush()
+
+                row = db.get(ParkingSessionRow, session_id)
+                if row is None:
+                    raise LookupError("Sesja nie istnieje")
+
+                if row.ended_at is None:
+                    raise ValueError("Sesja nadal trwa")
+
+                row.is_paid = True
+
+            return True
+
+        except IntegrityError:
+            with self.sessions() as db:
+                if db.get(ProcessedEventRow, event_id) is not None:
+                    return False
+            raise
 

@@ -11,3 +11,4 @@ class ParkingSession(SessionCreate):
     id: int 
     started_at: datetime
     ended_at: datetime | None = None
+    is_paid: bool = False
