@@ -1,0 +1,126 @@
+name: parkivo
+
+services:
+  eureka:
+    build: ./eureka-server
+    ports:
+      - "127.0.0.1:${EUREKA_HOST_PORT:-8761}:8761"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8761/"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    expose:
+      - "5672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  parking-session-service:
+    build: ./services/parking-session-service
+    expose:
+      - "8103"
+    environment:
+      DATABASE_URL: sqlite:////data/sessions.db
+      REDIS_URL: redis://redis:6379/0
+      CACHE_PREFIX: ${CACHE_PREFIX:-parkivo:lab6:parking-session-service}
+      CACHE_TTL_SECONDS: "60"
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      EUREKA_SERVER_URL: http://eureka:8761
+      SERVICE_NAME: PARKING-SESSION-SERVICE
+      SERVICE_PORT: "8103"
+      INSTANCE_HOST: parking-session-service
+      INSTANCE_IP: parking-session-service
+    volumes:
+      - session_data:/data
+    depends_on:
+      eureka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8103/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  billing-service:
+    build: ./services/billing-service
+    expose:
+      - "8104"
+    environment:
+      DATABASE_URL: sqlite:////data/billing.db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      EUREKA_SERVER_URL: http://eureka:8761
+      SERVICE_NAME: BILLING-SERVICE
+      SERVICE_PORT: "8104"
+      INSTANCE_HOST: billing-service
+      INSTANCE_IP: billing-service
+    volumes:
+      - billing_data:/data
+    depends_on:
+      eureka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      parking-session-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8104/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api-gateway:
+    build: ./gateway
+    ports:
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-8080}:8080"
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      GATEWAY_EUREKA_URL: http://eureka:8761/eureka/
+    depends_on:
+      eureka:
+        condition: service_healthy
+      parking-session-service:
+        condition: service_healthy
+      billing-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  session_data:
+  billing_data:
+  rabbitmq_data:

@@ -18,6 +18,7 @@ Główny cel: pokazać jeden proces biznesowy realizowany przez współpracując
 11. [Bramka API dla sesji i wyceny — LAB4](#gateway-lab4)
 12. [Parking Service i Reservation Service — LAB3](#reservation-lab3)
 13. [Zdarzenie potwierdzenia płatności — LAB5](#payment-lab5)
+14. [Konteneryzacja sesji i płatności — LAB6](#containers-lab6)
 
 ---
 
@@ -1892,3 +1893,138 @@ Odbiór wiadomości wymaga wywołania endpointu consume-events. Odzyskiwanie nie
 
 Adapter pochodzi z lab5-support. Przygotowanie integracji usług sesji i płatności stanowi część Krzysztofa Dąbrowskiego. Wykorzystano pomoc AI przy implementacji, przeglądzie kodu, testach i dokumentacji. Działanie sprawdzono przez pytest, HTTP, panel API RabbitMQ i odczyt SQLite.
 
+---
+
+<a id="containers-lab6"></a>
+
+## 14. Konteneryzacja sesji i płatności — LAB6
+
+### Zakres i przygotowane pliki
+
+Skonteneryzowano Parking Session Service oraz Billing Service wraz z Eureką, Redisem, RabbitMQ i bramką. Zakres obejmuje dwie usługi Krzysztofa Dąbrowskiego. Dołączenie usług Dawida Bajka do wspólnego Compose pozostaje etapem integracji pracy pary.
+
+W katalogach obu usług dodano `Dockerfile` i `.dockerignore`. Analogiczne pliki umieszczono w `gateway/`. Źródła Eureki z pakietu LAB3 skopiowano do `eureka-server/`, dzięki czemu budowanie odbywa się z repozytorium Parkivo. W głównym katalogu dodano `compose.yaml`.
+
+Obrazy Python korzystają z `python:3.12-slim`. Najpierw instalowane są zależności z requirements.txt, następnie kopiowany jest kod aplikacji. Proces działa jako użytkownik appuser, który ma prawo zapisu w /data. Obrazy JVM są budowane w Maven 3.9.11 z JDK 21, a gotowy JAR uruchamiany jest w obrazie eclipse-temurin:21-jre jako użytkownik appuser. Pliki .dockerignore wykluczają lokalne artefakty. Część wersji zależności Python jest określona zakresami lub pozostaje nieprzypięta, więc kolejne budowanie może pobrać nowsze biblioteki.
+
+### Kontenery, adresacja i wolumeny
+
+| Usługa | Obraz lub kontekst budowania | Port wewnętrzny | Domyślny port hosta | Konfiguracja i dane |
+|---|---|---|---|---|
+| eureka | ./eureka-server | 8761 | 8761, tylko 127.0.0.1 | Rejestr instancji, kontrola HTTP |
+| redis | redis:7-alpine | 6379 | — | Cache, zapis RDB i AOF wyłączony |
+| rabbitmq | rabbitmq:3.13-management-alpine | 5672, 15672 | 15672, tylko 127.0.0.1 | Panel guest/guest, wolumen rabbitmq_data |
+| parking-session-service | ./services/parking-session-service | 8103 | — | sqlite:////data/sessions.db, wolumen session_data |
+| billing-service | ./services/billing-service | 8104 | — | sqlite:////data/billing.db, wolumen billing_data |
+| api-gateway | ./gateway | 8080 | 8080, tylko 127.0.0.1 | SERVER_ADDRESS=0.0.0.0, GATEWAY_EUREKA_URL=http://eureka:8761/eureka/ |
+
+Obie usługi otrzymują EUREKA_SERVER_URL=http://eureka:8761 oraz RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/%2F. INSTANCE_HOST i INSTANCE_IP wskazują odpowiednio parking-session-service lub billing-service. Nazwy logiczne w Eurece pozostają PARKING-SESSION-SERVICE i BILLING-SERVICE. Usługa sesji używa REDIS_URL=redis://redis:6379/0, TTL 60 s i prefiksu ustawianego zmienną CACHE_PREFIX (domyślnie parkivo:lab6:parking-session-service).
+
+Adres 127.0.0.1 wewnątrz kontenera wskazuje jego własną pętlę zwrotną. Komunikacja między kontenerami odbywa się po nazwach DNS we wspólnej sieci parkivo_default. Uvicorn i bramka nasłuchują na 0.0.0.0. Do hosta publikowane są port bramki i panele diagnostyczne. Porty usług Python, Redis i AMQP mają wyłącznie dostęp wewnętrzny. Dyrektywa expose opisuje port kontenera, a publikacja portu hosta wymaga ports.
+
+Bazy sesji i płatności mają oddzielne nazwane wolumeny. Pliki SQLite i ich dzienniki znajdują się w /data. Domyślne nazwy zasobów Docker to parkivo_session_data, parkivo_billing_data i parkivo_rabbitmq_data. Redis służy do odtwarzalnego cache i po odtworzeniu kontenera rozpoczyna pracę z pustą pamięcią.
+
+Kontrole zdrowia obejmują HTTP dla Eureki, bramki i usług, redis-cli ping oraz check_running i check_port_connectivity dla RabbitMQ. Sam ping procesu RabbitMQ okazał się zbyt wczesnym sygnałem gotowości przy pierwszym uruchomieniu. Usługi oczekują na zależności przez condition: service_healthy. Rejestr klientów Eureki może wymagać dodatkowej chwili na odświeżenie po uzyskaniu statusu healthy.
+
+```mermaid
+flowchart LR
+    C[Klient na hoście] --> G
+    subgraph N[Sieć Docker Compose · parkivo_default]
+        G[API Gateway · 8080] --> S[Parking Session · 8103]
+        G --> B[Billing · 8104]
+        B -->|HTTP · wycena| S
+        B -->|publikacja| Q[RabbitMQ · 5672]
+        Q -->|odbiór i ACK| S
+        S --> R[Redis · 6379]
+        G -. rejestr .-> E[Eureka · 8761]
+        B -. rejestracja i odkrywanie .-> E
+        S -. rejestracja .-> E
+    end
+    S --> SD[(session_data · SQLite)]
+    B --> BD[(billing_data · SQLite)]
+    Q --> QD[(rabbitmq_data)]
+```
+
+### Budowanie, uruchomienie i zatrzymanie
+
+Polecenia wykonuje się z głównego katalogu Parkivo przy działającym Docker Desktop. Przed użyciem domyślnych portów należy zatrzymać wcześniejsze procesy i kontenery zajmujące 8080, 8761 i 15672.
+
+```bash
+docker compose config --quiet
+docker compose up --build -d
+docker compose ps
+docker compose logs --tail=30
+curl -i http://127.0.0.1:8080/health
+curl -i http://127.0.0.1:8080/api/sessions
+```
+
+W przeprowadzonych próbach ustawiono alternatywne porty hosta, aby uruchomić Parkivo obok wcześniejszych środowisk. Poniższe zmienne należy ustawić w terminalu przed poleceniami Compose, aby odtworzyć tę konfigurację.
+
+```bash
+export GATEWAY_HOST_PORT=18080
+export EUREKA_HOST_PORT=18761
+export RABBITMQ_MANAGEMENT_PORT=25672
+docker compose up --build -d --wait --wait-timeout 240
+```
+
+W tym wariancie bramka jest dostępna na 18080, Eureka na 18761, a panel RabbitMQ na 25672. Porty wewnątrz kontenerów pozostają zgodne z tabelą. Powrót do domyślnej konfiguracji wymaga usunięcia tych trzech zmiennych z terminala i ponownego wykonania up -d.
+
+Zatrzymanie kontenerów i usunięcie sieci z zachowaniem wolumenów wykonuje się przez:
+
+```bash
+docker compose down
+docker compose up -d --wait --wait-timeout 240
+```
+
+Pełne wyczyszczenie danych projektu wykonuje `docker compose down -v`. Polecenie usuwa również nazwane wolumeny SQLite i RabbitMQ. W eksperymencie trwałości użyto down bez opcji -v.
+
+### Wyniki sześciu scenariuszy
+
+Próby wykonano 23.11.2026 na portach 18080, 18761 i 25672. Utworzono sesję 5 i płatność 3 na 5 PLN. Przed testem izolacji zatrzymano pozostały lokalny proces Uvicorna z LAB5 na porcie 8103.
+
+| Scenariusz | Działanie i oczekiwanie | Rzeczywisty wynik | Wniosek |
+|---|---|---|---|
+| 1. Start i rejestracja | Uruchomienie sześciu komponentów, sprawdzenie healthy i hostów w Eurece | Sześć kontenerów healthy. Usługi UP pod parking-session-service i billing-service. | Rejestr zawiera adresy osiągalne we wspólnej sieci. |
+| 2. Izolacja portów | HTTP przez bramkę oraz próby TCP na 8103, 8104, 6379 i 5672 | Bramka zwróciła 200 z X-Gateway: lab4. Wszystkie cztery bezpośrednie porty odmówiły połączenia (errno 61). Docker inspect potwierdził brak mapowań tych portów. | Ruch klienta do usług przechodzi przez bramkę. |
+| 3. HTTP i cache | Utworzenie i zakończenie sesji, powtórne odczyty, błędne żądania i wycena | Utworzenie 201, zakończenie 200, MISS → HIT przed i po zmianie. Zajęte miejsce 409, błędne dane 422, brak sesji 404. Billing zwrócił 200 i kwotę 5 PLN. | Działają mechanizmy LAB1–LAB4 między kontenerami. |
+| 4. RabbitMQ i idempotentność | Płatność i publikacja identycznego duplikatu, odbiór zdarzeń, odczyt sesji | Odbiór 2 wiadomości i 1 unikatowego zdarzenia. Sesja otrzymała is_paid=true. Odczyty MISS → HIT. Event ID evt-1019006e0ae04c64abd2929f09956c14. | Konsument aktualizuje stan raz i unieważnia cache. |
+| 5. Trwałość wolumenów | Down bez -v, następnie up -d, porównanie danych i identyfikatorów kontenerów | Wszystkie sześć ID kontenerów zmieniło się. Sesja zachowała identyczne dane i is_paid=true. Płatność zachowała id, event_id i published_at. Pierwszy odczyt miał MISS. Ponowna płatność zwróciła 409. | Dane pochodzą z wolumenów, a cache został odtworzony. |
+| 6. Restart pojedynczej usługi | Restart parking-session-service i kontrola dostępności oraz czasów startu pozostałych kontenerów | Po 6,4 s potwierdzono odczyt przez bramkę, healthy i wpis UP w Eurece. Czasy startu pozostałych pięciu kontenerów nie zmieniły się. | Usługa wraca do działania samodzielnie. Pomiar obejmuje restart i sprawdzenie gotowości. |
+
+### Testy automatyczne
+
+Zestawy uruchomiono oddzielnie ze względu na powtarzające się nazwy modułów app i testów.
+
+```bash
+(cd services/parking-service && ../../.venv/bin/python -m pytest tests -q)
+(cd services/reservation-service && ../../.venv/bin/python -m pytest tests -q)
+(cd services/parking-session-service && ../../.venv/bin/python -m pytest tests -q)
+(cd services/billing-service && ../../.venv/bin/python -m pytest tests -q)
+GATEWAY_URL=http://127.0.0.1:18080 .venv/bin/python -m pytest tests/integration -q
+```
+
+Dla domyślnego portu bramki w ostatnim poleceniu podaje się 8080. Testy integracyjne wymagają uruchomionego Compose. Po aktualizacji struktury repozytorium testy Parking Service znajdują się w services/parking-service/tests.
+
+| Zestaw | Wynik |
+|---|---|
+| Parking Service, testy izolowane | 29 passed |
+| Reservation Service, testy izolowane | 10 passed |
+| Parking Session Service, testy izolowane | 17 passed |
+| Billing Service, testy izolowane | 10 passed |
+| Integracyjne przez bramkę kontenerową | 4 passed |
+| Razem | 70 passed |
+
+Testy Parking Service i Reservation Service sprawdzają aktualny kod tych usług w izolacji. Weryfikacja kontenerowa obejmuje sesje i płatności. Pełny scenariusz LAB5 wykonano dodatkowo przez HTTP i API RabbitMQ w ramach tabeli eksperymentów. Testy izolowane zgłosiły DeprecationWarning dotyczący aliasu BlockingPortal w Starlette.
+
+### Dokumentacja techniczna, ograniczenia i autorstwo
+
+| Źródło | Rozwiązany problem i zastosowanie | Weryfikacja |
+|---|---|---|
+| [Docker Docs — kolejność uruchomienia, Compose](https://docs.docker.com/compose/how-tos/startup-order/) | Uruchomienie zależności przed klientami przez healthcheck i depends_on z service_healthy | Start od odtworzonego środowiska i statusy healthy |
+| [Docker Docs — Volumes, Engine](https://docs.docker.com/engine/storage/volumes/) | Zachowanie danych przez named volumes montowane do /data | Porównanie sesji i płatności po down/up i zmianie ID kontenerów |
+
+Dokumentację Docker odczytano 23.11.2026. Konfiguracja odpowiada Compose Specification. Krzysztof Dąbrowski odpowiada za Parking Session Service i Billing Service. Przy przygotowaniu Dockerfile, Compose, prób i dokumentacji wykorzystano AI. Weryfikacja obejmowała budowanie obrazów, testy pytest, żądania HTTP, inspekcję kontenerów i odczyt SQLite.
+
+Usługa sesji jest właścicielem postoju i jego statusu, a Billing właścicielem płatności. Dane obu usług znajdują się w osobnych bazach. Integrację tworzą kontrakty HTTP i PaymentCompleted. Kopie adaptera messaging.py są utrzymywane lokalnie w usługach, co pozwala zmieniać ich implementację przy zachowaniu kontraktu. Synchroniczna wycena zależy od dostępności sesji, a aktualizacja opłacenia odbywa się przez choreografię zdarzeń.
+
+Bramka pozwala dodać trasę /api/v2 lub skierować wybraną ścieżkę do nowej implementacji podczas migracji Strangler Fig. Proponowany potok CI/CD obejmuje testy izolowane, budowę obrazów, uruchomienie środowiska testowego i testy przez bramkę przed publikacją obrazów. Przy migracji do Kubernetes usługi wymagają Deployment i Service, konfiguracja ConfigMap/Secret, a dane trwałe PVC. SQLite w tym wariancie zakłada pojedynczą instancję zapisującą dane każdej usługi. Przed zwiększeniem liczby replik trzeba ponownie zaprojektować warstwę trwałości.
