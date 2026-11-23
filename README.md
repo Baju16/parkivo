@@ -17,6 +17,7 @@ Główny cel: pokazać jeden proces biznesowy realizowany przez współpracując
 10. [Parking Session Service i Billing Service — LAB3](#billing-lab3)
 11. [Bramka API dla sesji i wyceny — LAB4](#gateway-lab4)
 12. [Parking Service i Reservation Service — LAB3](#reservation-lab3)
+13. [Zdarzenie potwierdzenia płatności — LAB5](#payment-lab5)
 
 ---
 
@@ -1715,3 +1716,179 @@ async def lifespan(app: FastAPI):
 - **Autor tej części (Parking Service, Reservation Service):** Dawid Bajek — wybór scenariusza i granic usług, uruchomienie środowiska, zrzut panelu Eureki.
 - **AI:** Claude Code (model Claude Sonnet 5.5) pomagał przy implementacji klienta Eureka w Parking Service, napisaniu Reservation Service, testów z atrapą oraz wersji roboczej dokumentacji
 - **Następny etap:** zmiana statusu miejsca na `RESERVED` przez `PATCH /spaces/{id}/status` po utworzeniu rezerwacji, z opisem spójności i obsługą błędów drugiego wywołania.
+
+---
+
+<a id="payment-lab5"></a>
+
+## 13. Zdarzenie potwierdzenia płatności — LAB5
+
+### Projekt przepływu i kontrakt zdarzenia
+
+Zaimplementowano potwierdzenie opłacenia postoju. Billing zapisuje płatność w SQLite i publikuje trwałe zdarzenie `PaymentCompleted`. Parking Session Service odbiera wiadomość po wywołaniu `POST /sessions/consume-events`, oznacza sesję jako opłaconą i unieważnia cache. Między publikacją a odbiorem sesja ma jeszcze poprzedni stan (spójność ostateczna).
+
+| Element kontraktu | Przyjęta wartość |
+|---|---|
+| Producent | Billing Service |
+| Konsument | Parking Session Service |
+| Typ zdarzenia | `PaymentCompleted` |
+| Exchange | `parkivo.events`, typ `topic`, `durable=True` |
+| Routing key | `payment.completed` |
+| Kolejka | `parking-session.payment-events`, `durable=True` |
+| Binding | `parkivo.events` → `parking-session.payment-events` dla klucza `payment.completed` |
+| Format wiadomości | JSON, `content_type=application/json` |
+| Trwałość wiadomości | `delivery_mode=2` |
+| Potwierdzenie odbioru | `auto_ack=False`, jawne ACK po pomyślnym przetworzeniu |
+
+Przykładowe zdarzenie dla sesji 7 i płatności 12 ma następującą postać.
+
+```json
+{
+  "event_id": "evt-7c52c7980c524515b02c789eff0eda48",
+  "event_type": "PaymentCompleted",
+  "payment_id": 12,
+  "session_id": 7,
+  "amount": 10,
+  "currency": "PLN",
+  "occurred_at": "2026-11-17T12:30:00+00:00"
+}
+```
+
+| Pole | Znaczenie |
+|---|---|
+| `event_id` | Unikatowy identyfikator zdarzenia, zachowywany przy jego ponownej publikacji |
+| `event_type` | Typ zdarzenia pozwalający rozpoznać jego znaczenie |
+| `payment_id` | Identyfikator zapisanej płatności |
+| `session_id` | Identyfikator sesji, której dotyczy płatność |
+| `amount` | Kwota płatności w jednostkach wskazanej waluty |
+| `currency` | Waluta płatności, w przyjętym wariancie `PLN` |
+| `occurred_at` | Czas wystąpienia zdarzenia w UTC, zapisany w formacie ISO 8601 |
+
+### Decyzje projektowe
+
+1. Sprawdzenie sesji i pobranie czasów do wyceny odbywa się synchronicznie przez Eurekę. Zdarzenie płatności jest przetwarzane później przez konsumenta. Taki przepływ realizuje choreografię.
+2. Publikacja następuje po zatwierdzeniu płatności. Billing korzysta z publisher confirms i `mandatory=True`. Po błędzie zwraca 503, a rekord pozostaje z pustym `published_at`. Ponowienie tego samego żądania wykorzystuje zapisane `payment_id` i `event_id`. Po potwierdzonej publikacji kolejne żądanie płatności zwraca 409.
+3. Konsument ustawia `is_paid=True` i zapisuje `event_id` w jednej transakcji. Po zatwierdzeniu usuwa cache, również przy ponownym dostarczeniu zdarzenia. Dzięki temu ponowienie może dokończyć unieważnienie po awarii Redisa. Następne odczyty mają MISS i HIT.
+4. Klucz główny tabeli `processed_events` zabezpiecza przed powtórnym zastosowaniem zdarzenia. Po pomyślnym przetworzeniu wysyłany jest ACK. Błąd handlera powoduje NACK z `requeue=True`. Dodatkowe pola JSON są ignorowane.
+5. Wiadomość oczekuje w trwałej kolejce podczas niedostępności konsumenta. Kolejka i binding są deklarowane przy starcie oraz przed odbiorem. Pierwsza płatność wymaga istniejącego bindingu. Jeżeli usługa sesji jest niedostępna już podczas synchronicznej weryfikacji, nowa płatność kończy się błędem zależności.
+
+### Architektura
+
+```mermaid
+flowchart LR
+    C[Klient] --> G[API Gateway · 8080]
+    G --> B[Billing · 8104]
+    G --> S[Parking Session · 8103]
+    B -->|HTTP · odczyt sesji| S
+    B --> P[(SQLite · płatności)]
+    B -->|payment.completed| E[Exchange · parkivo.events]
+    E --> Q[(Kolejka · parking-session.payment-events)]
+    Q -->|odbiór wyzwalany przez endpoint| S
+    S --> D[(SQLite · sesje i przetworzone zdarzenia)]
+    S --> R[(Redis · 6380)]
+    G -. rejestr .-> U[Eureka · 8761]
+    B -. rejestracja i odkrywanie .-> U
+    S -. rejestracja .-> U
+```
+
+### Uruchomienie i weryfikacja
+
+Polecenia dotyczą macOS/Linux i katalogów `parkivo`, `lab3-support` oraz `lab5-support` umieszczonych obok siebie. Wymagane są działający Docker, środowisko Python projektu oraz Java i Maven opisane w LAB4. Najpierw w głównym katalogu Parkivo instaluje się zależności.
+
+```bash
+.venv/bin/python -m pip install -r services/billing-service/requirements.txt
+.venv/bin/python -m pip install -r services/parking-session-service/requirements.txt
+(cd ../lab5-support && docker compose up -d rabbitmq)
+docker start parkivo-session-redis
+(cd ../lab3-support && docker compose up --build -d eureka)
+docker exec lab5-rabbitmq rabbitmq-diagnostics -q ping
+docker exec parkivo-session-redis redis-cli ping
+```
+
+Utworzenie kontenera Redis przy pierwszym uruchomieniu opisano w [LAB2](#session-lab2). RabbitMQ udostępnia AMQP na porcie 5672 i panel na 15672 z loginem i hasłem `guest`.
+
+W osobnym terminalu, zaczynając w katalogu Parkivo, uruchamia się usługę sesji. W prefiksie należy podać własny numer albumu.
+
+```bash
+cd services/parking-session-service
+export DATABASE_URL="sqlite:///./sessions-lab5.db"
+export REDIS_URL="redis://127.0.0.1:6380/0"
+export CACHE_PREFIX="lab5:TWOJ_NUMER_ALBUMU:parking-session-service"
+export CACHE_TTL_SECONDS=60
+export RABBITMQ_URL="amqp://guest:guest@127.0.0.1:5672/%2F"
+export EUREKA_SERVER_URL="http://127.0.0.1:8761"
+export SERVICE_NAME="PARKING-SESSION-SERVICE" SERVICE_PORT=8103
+export INSTANCE_HOST=localhost INSTANCE_IP=127.0.0.1
+../../.venv/bin/python -m uvicorn app.main:app --port 8103
+```
+
+W kolejnym terminalu, również zaczynając w Parkivo, uruchamia się Billing.
+
+```bash
+cd services/billing-service
+export DATABASE_URL="sqlite:///./billing-lab5.db"
+export RABBITMQ_URL="amqp://guest:guest@127.0.0.1:5672/%2F"
+export EUREKA_SERVER_URL="http://127.0.0.1:8761"
+export SERVICE_NAME="BILLING-SERVICE" SERVICE_PORT=8104
+export INSTANCE_HOST=localhost INSTANCE_IP=127.0.0.1
+../../.venv/bin/python -m uvicorn app.main:app --port 8104
+```
+
+Po rejestracji obu usług w Eurece uruchamia się bramkę w kolejnym terminalu.
+
+```bash
+cd gateway
+export GATEWAY_PORT=8080
+export GATEWAY_EUREKA_URL="http://127.0.0.1:8761/eureka/"
+mvn spring-boot:run
+```
+
+W próbach użyto nowych baz `sessions-lab5.db` i `billing-lab5.db`. Istniejąca baza z wcześniejszych laboratoriów wymaga migracji kolumny `is_paid`, ponieważ `create_all()` tworzy nowe tabele, ale nie rozszerza istniejących tabel.
+
+Przez bramkę tworzy się sesję (`POST /api/sessions`), kończy ją (`POST /api/sessions/{id}/end`) i dwukrotnie odczytuje (`GET /api/sessions/{id}`). Następnie wykonuje się `POST /api/billing/payments/{id}`. Po publikacji w panelu RabbitMQ można zaobserwować Ready: 1. Dopiero `POST /api/sessions/consume-events` aktualizuje opłacenie sesji. Kolejne odczyty mają `is_paid: true`, MISS, a następnie HIT. Wszystkie te odpowiedzi przechodzą przez trasę z nagłówkiem `X-Gateway: lab4`.
+
+Przy zatrzymywaniu używa się Ctrl+C w terminalach aplikacji i bramki, `docker compose stop rabbitmq` w katalogu lab5-support, `docker compose stop eureka` w lab3-support oraz `docker stop parkivo-session-redis`.
+
+### Wyniki eksperymentów z rzeczywistym RabbitMQ
+
+Próby wykonano 23.11.2026 przez bramkę na porcie 8080.
+
+| Scenariusz | Wykonanie i rzeczywisty wynik |
+|---|---|
+| Buforowanie podczas zatrzymania konsumenta | Opłacono sesję 1 na 5 PLN. Przed zatrzymaniem, po zatrzymaniu i po 5 s niedostępności kolejka miała Ready: 1. Przywrócono usługę z tą samą bazą. Odbiór zwrócił 1 wiadomość i 1 unikatowe zdarzenie. Sesja miała `is_paid: true`, odczyty MISS i HIT, kolejka Ready: 0. |
+| Duplikat zdarzenia | Dla sesji 2 opublikowano dwa identyczne zdarzenia z ID `evt-9917d293a96649c5aae4b42f8a0ba7e5`. Ready: 2. Odbiór zwrócił `consumed_messages: 2` i `unique_events_processed: 1`. W SQLite potwierdzono jeden zapis event_id, sesja była opłacona, kolejka pusta. |
+| Odrzucone żądania | Płatność za aktywną sesję 3 zwróciła 409, za nieistniejącą 1000003 — 404, za `invalid-id` — 422. Po każdym żądaniu sprawdzono pustą kolejkę, również przez bezpośrednią próbę pobrania wiadomości. Stan sesji pozostał bez zmian. |
+| Niedostępność brokera | Zatrzymano `lab5-rabbitmq`. Płatność za sesję 4 i odbiór zdarzeń zwróciły 503. W Billing istniała płatność 4 z pustym `published_at`. Po starcie brokera ponowienie zwróciło 201 z tym samym event_id `evt-a2ccce20bdf446459a4f589186f60cfe`. Odebrano jedno zdarzenie, sesja została opłacona, kolejka była pusta. |
+
+### Testy automatyczne
+
+Z głównego katalogu projektu wykonuje się osobne zestawy, aby moduły o takich samych nazwach w różnych usługach były importowane w odpowiednim kontekście.
+
+```bash
+.venv/bin/python -m pytest tests --ignore=tests/integration -q
+(cd services/parking-session-service && ../../.venv/bin/python -m pytest tests -q)
+(cd services/billing-service && ../../.venv/bin/python -m pytest tests -q)
+.venv/bin/python -m pytest tests/integration -q
+```
+
+| Zestaw | Wynik z 23.11.2026 |
+|---|---|
+| Parking Service | 28 passed |
+| Parking Session Service | 17 passed |
+| Billing Service | 10 passed |
+| Integracja LAB4 przez działającą bramkę | 4 passed |
+| Łącznie | 59 passed |
+
+Testy LAB5 obejmują zapis i publikację płatności, awarię brokera i ponowienie z zachowaniem identyfikatorów, brak publikacji dla 404/409/422, duplikat zdarzenia, tolerowanie dodatkowych pól, zmianę stanu sesji i unieważnienie cache oraz 503 po stronie konsumenta. Testy jednostkowe używają InMemoryEventBroker. Pełny przepływ LAB5 z prawdziwym RabbitMQ sprawdzono w eksperymentach opisanych powyżej. Pytest zgłosił ostrzeżenie DeprecationWarning dotyczące aliasu BlockingPortal w Starlette.
+
+### Ograniczenia i dokumentacja techniczna
+
+Odbiór wiadomości wymaga wywołania endpointu consume-events. Odzyskiwanie nieopublikowanej płatności wymaga ponowienia żądania przez klienta. Awaria po publikacji i przed zapisem published_at może spowodować duplikat, dlatego konsument sprawdza event_id. Niepoprawne zdarzenie wraca do kolejki przez NACK i wymaga interwencji, aby usunąć przyczynę błędu. W użytym compose RabbitMQ przechowuje dane w kontenerze, więc trwałość sprawdzono dla zatrzymania i startu istniejącego kontenera.
+
+| Źródło | Zastosowany mechanizm | Weryfikacja |
+|---|---|---|
+| [RabbitMQ — Consumer Acknowledgements and Publisher Confirms](https://www.rabbitmq.com/docs/confirms) | Jawny ACK/NACK oraz publisher confirms | Próby duplikatu, zatrzymania konsumenta i awarii brokera |
+| [Pika — BlockingConnection](https://pika.readthedocs.io/en/stable/modules/adapters/blocking.html) | confirm_delivery, basic_publish z mandatory, basic_get z auto_ack=False | Publikacja i odbiór zdarzenia przez rzeczywisty RabbitMQ |
+
+Adapter pochodzi z lab5-support. Przygotowanie integracji usług sesji i płatności stanowi część Krzysztofa Dąbrowskiego. Wykorzystano pomoc AI przy implementacji, przeglądzie kodu, testach i dokumentacji. Działanie sprawdzono przez pytest, HTTP, panel API RabbitMQ i odczyt SQLite.
+
