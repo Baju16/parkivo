@@ -3,6 +3,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.messaging import InMemoryEventBroker
 
 
 def create_session(client):
@@ -65,6 +66,7 @@ def test_startup_creates_configured_redis_client(tmp_path, monkeypatch, fake_red
     app = create_app(
         database_url=f"sqlite:///{tmp_path / 'sessions.db'}",
         eureka_client=fake_eureka,
+        event_broker=InMemoryEventBroker()
     )
     with TestClient(app):
         factory.assert_called_once_with(redis_url)

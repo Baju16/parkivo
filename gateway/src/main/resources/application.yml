@@ -27,7 +27,7 @@ spring:
             - id: billing
               uri: lb://BILLING-SERVICE
               predicates:
-                - Path=/api/billing/quote/{id}
+                - Path=/api/billing/quote/{id},/api/billing/payments/{id}
               filters:
                 - StripPrefix=1
 

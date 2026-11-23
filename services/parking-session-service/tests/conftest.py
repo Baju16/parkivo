@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError
 
 from app.main import create_app
+from app.messaging import InMemoryEventBroker
 
 
 class MemoryRedis:
@@ -61,7 +62,7 @@ def app_factory(tmp_path, monkeypatch, fake_eureka):
     def make_app(redis_client=None):
         if redis_client is None:
             redis_client = MemoryRedis()
-        return create_app(database_url=database_url, redis_client=redis_client,  eureka_client=fake_eureka)
+        return create_app(database_url=database_url, redis_client=redis_client,  eureka_client=fake_eureka, event_broker=InMemoryEventBroker())
 
     return make_app
 

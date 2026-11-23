@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from app.messaging import InMemoryEventBroker
 
 from app.main import create_app
 
@@ -34,8 +35,12 @@ def fake_eureka():
 
 
 @pytest.fixture
-def client(fake_eureka):
-    app = create_app(eureka_client=fake_eureka)
+def client(fake_eureka, tmp_path):
+    app = create_app(
+        eureka_client=fake_eureka,
+        event_broker=InMemoryEventBroker(),
+        database_url=f"sqlite:///{tmp_path / 'billing.db'}",
+    )
 
     with TestClient(app) as test_client:
         yield test_client
